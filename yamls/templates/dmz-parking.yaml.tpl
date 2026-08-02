@@ -7,7 +7,7 @@ properties:
   containers:
     - name: parking
       properties:
-        image: anacha1304/sabanacorp-parking:1.0.0
+        image: maosuarez/sabanacorp-parking:latest
         environmentVariables:
           - {name: PARKING_FINAL_FLAG, secureValue: "FLAG{CAMBIAR_POR_FLAG_FINAL_CTFD}"}
           - {name: TZ, value: "America/Bogota"}

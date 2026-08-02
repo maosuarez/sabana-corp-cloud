@@ -1,15 +1,7 @@
 # ACI container group: filesrv (compartido, snet-dmz-shared 10.50.0.0/24)
-# Imagen publica (filebrowser/filebrowser), no requiere build propio.
-#
-# GAP SIN RESOLVER: en docker-compose ./file-srv/data se monta read-only con el contenido
-# vulnerable (manuales, pistas de parqueadero, credenciales antiguas, etc.) y ./file-srv/config
-# guarda filebrowser.db (usuarios/config, incluye el acceso anonimo). ACI no tiene bind mount a
-# disco local del host -- para reproducir esto hay que:
-#   (a) usar un Azure File Share + volume "azureFile" en este YAML, subiendo antes el contenido
-#       de sabana-corp-dmz/file-srv/{data,config}, o
-#   (b) construir una imagen propia con ese contenido ya copiado (COPY en un Dockerfile).
-# Sin uno de los dos, este contenedor arranca vacio y el reto de acceso anonimo no tiene nada que
-# encontrar. Pendiente de decidir cual opcion se usa.
+# Imagen propia (maosuarez/sabanacorp-filesrv): filebrowser con el contenido de
+# sabana-corp-dmz/file-srv/{data,config} horneado dentro va Dockerfile -- ya no depende de un
+# bind mount, resuelve el gap de persistencia que tenia la imagen generica filebrowser/filebrowser.
 apiVersion: 2021-07-01
 location: eastus2
 name: dmz-filesrv
@@ -17,7 +9,7 @@ properties:
   containers:
     - name: filesrv
       properties:
-        image: filebrowser/filebrowser:latest
+        image: maosuarez/sabanacorp-filesrv:latest
         environmentVariables:
           - {name: FB_DATABASE, value: "/database/filebrowser.db"}
         resources: {requests: {cpu: 0.25, memoryInGB: 0.5}}

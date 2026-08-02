@@ -55,8 +55,11 @@ generadores y despliega su salida — no hay que tocar `yamls/` a mano en el flu
   número de equipo vía `${TEAM}`; misma plantilla sirve para team1, team2, ..., teamN. Imágenes
   `maosuarez/sabana-lab-*:latest` (repo `../sabana-corp-network`), subred `snet-team${TEAM}`.
 - **`templates/dmz-*.yaml.tpl`** (filesrv, wiki-db, wiki, parking, 11 decoy-*) — un solo
-  despliegue compartido, no dependen de ningún equipo. Imágenes de `../sabana-corp-dmz` (Docker
-  Hub `anacha1304`, distinto de `maosuarez`), subred fija `snet-dmz-shared`.
+  despliegue compartido, no dependen de ningún equipo. Imágenes propias en Docker Hub
+  `maosuarez` (`sabanacorp-filesrv`, `sabanacorp-wikidb`, `sabanacorp-parking`,
+  `sabanacorp-decoy`), construidas a partir de `../sabana-corp-dmz` con el contenido del reto ya
+  horneado — salvo `wiki`, que sigue en `lscr.io/linuxserver/bookstack` (imagen pública genérica).
+  Subred fija `snet-dmz-shared`.
 
 Las flags/secretos de los servicios por equipo (`FLAG_*`, `PIVOT_SSH_PASSWORD`, `BOT_SECRET`,
 contraseñas de DB, `JWT_SIGNING_SECRET`) **son los mismos para todos los equipos** — vienen de

@@ -1,11 +1,9 @@
 # ACI container group: wiki-db (compartido, snet-dmz-shared 10.50.0.0/24)
 # Backend MariaDB para dmz-wiki.yaml (BookStack).
 #
-# GAP SIN RESOLVER: en docker-compose, wiki/init/bookstack_seed.sql se monta en
-# /docker-entrypoint-initdb.d para precargar las pistas criptograficas. ACI no soporta bind mount
-# de un archivo local -- hay que hornear el .sql dentro de una imagen propia de mariadb (Dockerfile
-# con COPY a /docker-entrypoint-initdb.d/) o usar un Azure File Share. Sin esto, wiki-db arranca
-# con la base de datos vacia (BookStack solo crea sus tablas internas, no el contenido del reto).
+# Imagen propia (maosuarez/sabanacorp-wikidb): mariadb con wiki/init/bookstack_seed.sql horneado
+# en /docker-entrypoint-initdb.d via Dockerfile -- ya no depende de un bind mount, resuelve el gap
+# de persistencia que tenia la imagen generica mariadb:10.11 (arrancaba sin las pistas del reto).
 apiVersion: 2021-07-01
 location: eastus2
 name: dmz-wiki-db
@@ -13,7 +11,7 @@ properties:
   containers:
     - name: wiki-db
       properties:
-        image: mariadb:10.11
+        image: maosuarez/sabanacorp-wikidb:latest
         environmentVariables:
           - {name: MYSQL_ROOT_PASSWORD, secureValue: "rootpass"}
           - {name: MYSQL_DATABASE, value: "bookstack"}

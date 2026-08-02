@@ -7,7 +7,7 @@ properties:
   containers:
     - name: decoy-mail
       properties:
-        image: anacha1304/sabanacorp-decoy:1.0.0
+        image: maosuarez/sabanacorp-decoy:latest
         environmentVariables:
           - {name: DECOY_NAME, value: "mail-old"}
           - {name: DECOY_PROFILE, value: "mail"}

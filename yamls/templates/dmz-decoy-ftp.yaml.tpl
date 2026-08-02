@@ -7,7 +7,7 @@ properties:
   containers:
     - name: decoy-ftp
       properties:
-        image: anacha1304/sabanacorp-decoy:1.0.0
+        image: maosuarez/sabanacorp-decoy:latest
         environmentVariables:
           - {name: DECOY_NAME, value: "ftp-archive"}
           - {name: DECOY_PROFILE, value: "ftp"}

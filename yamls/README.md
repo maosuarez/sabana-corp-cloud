@@ -15,8 +15,10 @@ una por servicio: `database`, `webapp`, `linux-server`, `xss-bot`. Imágenes de
 `sabana-corp-network`, subred `snet-team${TEAM}`.
 
 **`templates/dmz-*.yaml.tpl`** — plantillas de los servicios compartidos (no dependen de ningún
-equipo): `filesrv`, `wiki-db`, `wiki`, `parking`, 11 `decoy-*`. Imágenes de `sabana-corp-dmz`,
-subred fija `snet-dmz-shared`.
+equipo): `filesrv`, `wiki-db`, `wiki`, `parking`, 11 `decoy-*`. Todas las imágenes son de la cuenta
+Docker Hub `maosuarez` (`sabanacorp-filesrv`, `sabanacorp-wikidb`, `sabanacorp-parking`,
+`sabanacorp-decoy`), construidas a partir del contenido de `sabana-corp-dmz`, salvo `wiki`
+(`lscr.io/linuxserver/bookstack`, imagen pública genérica). Subred fija `snet-dmz-shared`.
 
 **`generate-team.sh <N>`** / **`generate-dmz.sh`** — resuelven `${DOCKERHUB_USER}`,
 `${DOCKERHUB_TOKEN}`, `${SUBSCRIPTION_ID}`, `${RESOURCE_GROUP}`, `${VNET}` (y `${TEAM}` en el caso
@@ -63,10 +65,14 @@ az container show -g rg-ctf-semana-ingenieria-test -n <nombre> --query ipAddress
 
 ## Pendiente / gaps conocidos
 
-- **Persistencia**: `filesrv` (contenido de `file-srv/data`), `wiki-db` (seed SQL) y `wiki`
-  (config de BookStack) dependen de bind mounts en docker-compose que ACI no soporta. Hace falta
-  decidir entre Azure File Share (`azureFile` volume) u hornear el contenido en una imagen propia.
-  Sin esto, esos tres contenedores arrancan vacíos.
+- **Persistencia — resuelto para `filesrv` y `wiki-db`**: ambos usan ahora imágenes propias
+  (`maosuarez/sabanacorp-filesrv`, `maosuarez/sabanacorp-wikidb`) con el contenido de
+  `file-srv/data` y `wiki/init/bookstack_seed.sql` horneado vía Dockerfile — ya no dependen del
+  bind mount de docker-compose que ACI no soporta.
+- **Persistencia — pendiente para `wiki`**: BookStack sigue persistiendo su config/keys en
+  `/config` (volumen en docker-compose); sin volumen persistente en ACI esos datos se pierden si
+  el contenedor se reinicia. Aceptable para un evento de un día si no se reinicia; pendiente de
+  decidir si se usa Azure File Share.
 - **CTFd / Provisioner / Monitor**: no implementados todavía en ningún repo.
 - **Conector VPN**: paso futuro, no diseñado.
 - **Acceso desde la red interna**: cada contenedor ya tiene IP única dentro de su subred

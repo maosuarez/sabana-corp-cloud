@@ -7,7 +7,7 @@ properties:
   containers:
     - name: decoy-nas
       properties:
-        image: anacha1304/sabanacorp-decoy:1.0.0
+        image: maosuarez/sabanacorp-decoy:latest
         environmentVariables:
           - {name: DECOY_NAME, value: "storage-01"}
           - {name: DECOY_PROFILE, value: "nas"}
