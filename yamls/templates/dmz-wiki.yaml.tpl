@@ -9,7 +9,7 @@
 # volumen persistente en ACI, esos datos se pierden si el contenedor se reinicia. Aceptable para un
 # evento de un dia si no se reinicia, pero pendiente de decidir si se usa Azure File Share.
 #
-# Imagen publica en lscr.io (no Docker Hub) -- no necesita imageRegistryCredentials.
+# Imagen propia (maosuarez/sabanacorp-wiki), reemplaza la generica lscr.io/linuxserver/bookstack.
 apiVersion: 2021-07-01
 location: eastus2
 name: dmz-wiki
@@ -17,7 +17,7 @@ properties:
   containers:
     - name: wiki
       properties:
-        image: lscr.io/linuxserver/bookstack:latest
+        image: maosuarez/sabanacorp-wiki:latest
         environmentVariables:
           - {name: APP_URL, value: "http://wiki-int.empresa.local"}
           - {name: APP_KEY, secureValue: "base64:LrA+08seUQX+vAK+resD+m79e2Gj68/pGXCr1kqm75M="}
@@ -34,6 +34,11 @@ properties:
 
   osType: Linux
   restartPolicy: Always
+
+  imageRegistryCredentials:
+    - server: index.docker.io
+      username: "${DOCKERHUB_USER}"
+      password: "${DOCKERHUB_TOKEN}"
 
   subnetIds:
     - id: "/subscriptions/${SUBSCRIPTION_ID}/resourceGroups/${RESOURCE_GROUP}/providers/Microsoft.Network/virtualNetworks/${VNET}/subnets/snet-dmz-shared"

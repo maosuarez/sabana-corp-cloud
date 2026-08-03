@@ -5,7 +5,8 @@
 # WEBAPP_BASE_URL: sin DNS entre container groups en ACI. Despliega team${TEAM}-webapp.yaml
 # primero, obten su IP con:
 #   az container show -g <RESOURCE_GROUP> -n team${TEAM}-webapp --query ipAddress.ip -o tsv
-# y reemplaza <WEBAPP_IP> en el archivo generado. No expone puertos: solo hace peticiones salientes.
+# y reemplaza <WEBAPP_IP> en el archivo generado. Solo hace peticiones salientes; el puerto 80 en
+# ipAddress es un placeholder no usado -- ACI exige al menos uno para ipAddress type Private.
 apiVersion: 2021-07-01
 location: eastus2
 name: team${TEAM}-xss-bot
@@ -19,6 +20,7 @@ properties:
           - {name: BOT_SECRET, secureValue: "${BOT_SECRET}"}
           - {name: BOT_VISIT_INTERVAL_SECONDS, value: "30"}
         resources: {requests: {cpu: 0.25, memoryInGB: 0.5}}
+        ports: [{port: 80}]
 
   osType: Linux
   restartPolicy: OnFailure
@@ -33,3 +35,5 @@ properties:
 
   ipAddress:
     type: Private
+    ports:
+      - {protocol: tcp, port: 80}

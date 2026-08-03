@@ -2,6 +2,10 @@
 # Imagen propia (maosuarez/sabanacorp-filesrv): filebrowser con el contenido de
 # sabana-corp-dmz/file-srv/{data,config} horneado dentro va Dockerfile -- ya no depende de un
 # bind mount, resuelve el gap de persistencia que tenia la imagen generica filebrowser/filebrowser.
+#
+# Puerto 8080, no 80: filebrowser corre como usuario no-root y bindear <1024 requiere
+# CAP_NET_BIND_SERVICE via file capability en el binario -- ACI (aislamiento Hyper-V) la descarta,
+# a diferencia de Docker plano donde sí funciona. Ver config/settings.json en sabana-corp-dmz.
 apiVersion: 2021-07-01
 location: eastus2
 name: dmz-filesrv
@@ -13,7 +17,7 @@ properties:
         environmentVariables:
           - {name: FB_DATABASE, value: "/database/filebrowser.db"}
         resources: {requests: {cpu: 0.25, memoryInGB: 0.5}}
-        ports: [{port: 80}]
+        ports: [{port: 8080}]
 
   osType: Linux
   restartPolicy: Always
@@ -29,4 +33,4 @@ properties:
   ipAddress:
     type: Private
     ports:
-      - {protocol: tcp, port: 80}
+      - {protocol: tcp, port: 8080}

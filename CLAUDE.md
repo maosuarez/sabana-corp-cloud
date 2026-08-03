@@ -24,6 +24,7 @@ cp yamls/.env.secrets.example yamls/.env.secrets   # solo la primera vez, editar
 ./lab-azure.sh deploy-dmz    # despliega los 15 contenedores compartidos de la DMZ
 ./lab-azure.sh add-team 1    # crea snet-team1 y despliega sus 4 contenedores
 ./lab-azure.sh add-team 2    # repetir por cada equipo adicional (mismo comando, distinto N)
+./lab-azure.sh test [N]      # atajo de prueba: up + deploy-dmz + add-team N (N=1 por defecto)
 ./lab-azure.sh status        # lista todos los container groups del RG (nombre/estado/IP)
 ./lab-azure.sh down          # borra el Resource Group completo (pide confirmación "si")
 ```
@@ -36,12 +37,46 @@ Diseño de `up`/`down`: todo el lab vive en un único Resource Group
 (`rg-ctf-semana-ingenieria-test`), así que "down" es un solo comando que lo destruye entero.
 Mantener este invariante al extender el script — no crear recursos fuera del RG del lab.
 
+## Costos
+
+```bash
+az consumption usage list --output table   # consumo detallado
+az billing account list -o table
+az consumption budget list --output table
+```
+
+Suscripción es "Azure for Students" (crédito, no pay-as-you-go): `az consumption usage list`
+suele devolver 403/AuthorizationFailed en este tipo de suscripción — no es un error de config, es
+una limitación conocida de Azure for Students. En ese caso el balance de crédito solo se ve en el
+portal: portal.azure.com → Suscripciones → Azure for Students → Cost analysis (o el widget de
+crédito restante en el dashboard).
+
 ## Decisión de diseño: 1 YAML = 1 contenedor = 1 IP
 
 Cada contenedor se despliega como su propio `az container create --file <container>.yaml`
 (container group de un solo contenedor), no agrupado con otros — así cada uno recibe su propia
 IP privada dentro de la subred de su equipo o de la DMZ, en vez de compartir una sola IP como
 pasaba en el primer prototipo (`team1-edificio`, ya reemplazado).
+
+## Decisión de diseño: xss-bot es N instancias (una por equipo), no 1 bot compartido
+
+Se evaluó consolidar el `xss-bot` de todos los equipos en un único contenedor compartido (en
+`snet-mgmt`, con acceso saliente a cada `snet-teamX` pero sin entrante desde ellas vía NSG) para
+ahorrar RAM: hoy son N contenedores Playwright/Chromium, uno por equipo.
+
+Se descartó. Motivo: en un CTF donde los equipos compiten explotando XSS contra el bot, el
+aislamiento entre equipos es parte del modelo de amenaza, no solo un costo a optimizar. Un bot
+compartido introduce:
+- **Punto único de falla**: si un equipo tumba o cuelga el bot (payload `while(true)`, etc.), el
+  Reto 1 se cae para todos los equipos simultáneamente, no solo para el atacante.
+- **Superficie cruzada**: cualquier bug en el loop que visita las colas de N equipos arriesga
+  filtrar cookies/timing de un equipo hacia otro.
+- **Complejidad de red no validada**: requeriría NSGs para el aislamiento direccional
+  (`snet-mgmt` → `snet-teamX` sí, `snet-teamX` → `snet-mgmt` no), algo que el proyecto aún no ha
+  probado (ver nota de NSGs en "Arquitectura de red objetivo").
+
+El ahorro de RAM no justifica esa complejidad de forma preventiva. Revisar esta decisión solo si
+el costo real (medido, no estimado) se vuelve un problema — no antes.
 
 ## Decisión de diseño: plantillas + generadores, no YAML estático
 
@@ -93,6 +128,11 @@ VPN.
   - Parqueadero — reto final (idem, DMZ compartida)
   - Lo que sí vive en `snet-teamX`: `database`, `webapp`, `linux-server`, `xss-bot` (retos 1-3 del edificio de cada equipo)
 - **snet-mgmt** (`10.99.0.0/24`) — red de gestión, creada por `up`, sin servicios todavía
+- **snet-dmz-vm** (`10.51.0.0/24`) — DMZ paralela para servicios que no corren en ACI (creada por
+  `up`, sin delegar, sin servicios todavía). Ver `docs/plans/wiki-on-vm.md`: `dmz-wiki` no arranca
+  en ACI (s6-overlay exige PID 1, ACI+VNet no lo garantiza) — migra aquí vía VM + docker-compose
+  el día que haya cuota de VM. No puede ir en `snet-dmz-shared` porque esa subred está delegada a
+  `Microsoft.ContainerInstance/containerGroups` (delegación exclusiva, no admite VMs).
 - **snet-wg-gateway** (`10.10.0.0/28`) — gateway WireGuard, creada por `up`, sin servicio todavía
 
 Nota de implementación vs. arquitectura original: File-Srv/Wiki-Int/decoys/Parqueadero se
@@ -101,9 +141,12 @@ implementó como un único despliegue compartido en `snet-dmz-shared` (ver
 `../sabana-corp-dmz/README.md`). Se siguió esa implementación real en vez de la descripción
 original — si se decide separarlos por equipo más adelante, hay que revisar esta sección.
 
-Pendiente, sin diseño aún: conector VPN hacia la nube (paso posterior, no asumir forma); acceso
-entre subredes de la VNet (Azure enruta entre subredes de la misma VNet por defecto, pero no se
-ha validado con NSGs si se añaden).
+Pendiente, sin diseño aún: conector VPN hacia la nube (paso posterior, no asumir forma). Hoy el
+acceso entre subredes de la VNet es libre albedrío total (Azure enruta entre subredes de la misma
+VNet por defecto, y no hay un solo NSG creado) — un equipo puede alcanzar la subred de otro
+equipo, o `snet-mgmt`, sin restricción. Propuesta de reglas (equipos aislados entre sí, nadie
+puede llegar a `snet-mgmt` salvo staff, DMZ no puede iniciar conexiones hacia equipos) documentada
+en `docs/plans/network-segmentation-nsgs.md` — **no implementada todavía**, solo diseño.
 
 ## Notas de archivos
 
