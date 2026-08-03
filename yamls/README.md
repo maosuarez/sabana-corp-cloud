@@ -30,6 +30,13 @@ solo hace falta para depurar la generación sin desplegar.
 `generated/` está en `.gitignore` (contiene secretos resueltos) — es la salida intermedia que
 `lab-azure.sh` despliega con `az container create --file`, no se versiona.
 
+**`templates/wiki-vm-compose.yml.tpl`** / **`generate-wiki-vm.sh`** / **`wiki-vm/cloud-init.yaml`**
+— NO PROBADO, ver `docs/plans/wiki-on-vm.md`. Generan/despliegan (`lab-azure.sh
+deploy-wiki-vm`) un docker-compose de wiki+wiki-db sobre una VM en `snet-dmz-vm`, en vez
+de ACI (workaround al problema de s6-overlay/PID1 documentado en la memoria del proyecto).
+Bloqueado hoy en que Azure for Students no puede pedir aumento de quota de VM — los
+archivos existen para no repetir el diseño cuando se desbloquee, pero nunca se corrieron.
+
 **`.env.secrets`** (gitignored, plantilla en `.env.secrets.example`) — flags y secretos de los
 servicios **por equipo**, **compartidos por todos los equipos**: `add-team 1` y `add-team 2`
 producen el mismo `FLAG_DATABASE`, `FLAG_WEBAPP_XSS`, etc. Solo cambia el nombre del container

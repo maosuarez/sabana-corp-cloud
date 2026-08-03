@@ -1,0 +1,13 @@
+#cloud-config
+# NO PROBADO -- ver docs/plans/wiki-on-vm.md. Instala Docker Engine + plugin compose en la VM al
+# primer arranque, via el script oficial de Docker (necesita salida a internet desde snet-dmz-vm;
+# no confirmado que esa subred la tenga -- ver nota de riesgo en el plan).
+package_update: true
+packages:
+  - ca-certificates
+  - curl
+
+runcmd:
+  - curl -fsSL https://get.docker.com | sh
+  - systemctl enable --now docker
+  - usermod -aG docker azureuser

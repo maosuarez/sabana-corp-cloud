@@ -27,6 +27,12 @@
 #   ./lab-azure.sh deploy-dmz    # despliega los 15 contenedores compartidos de la DMZ
 #   ./lab-azure.sh add-team 1    # crea snet-team1 y despliega sus 4 contenedores
 #   ./lab-azure.sh add-team 2    # idem para team2 (repetir por cada equipo)
+#   ./lab-azure.sh deploy-wiki-vm # crea vm-wiki en snet-dmz-vm y levanta wiki+wiki-db via
+#                                 # docker-compose -- NO PROBADO, ver docs/plans/wiki-on-vm.md
+#                                 # (bloqueado en cuota de VM = 0, Azure for Students no elegible
+#                                 # para pedir aumento)
+#   ./lab-azure.sh test [N]      # atajo: up + deploy-dmz + add-team N (N=1 si se omite) -- todo
+#                                # el laboratorio de una vez para pruebas rapidas
 #   ./lab-azure.sh status        # lista todos los container groups del RG (nombre/estado/IP)
 #   ./lab-azure.sh down          # destruye TODO (borra el resource group completo)
 #
@@ -60,11 +66,38 @@ get_subscription_id() {
   echo "$SUBSCRIPTION_ID"
 }
 
-# Despliega un container group desde un YAML y devuelve su IP privada por stdout.
+# Espera hasta que un container group tenga IP asignada. Los container groups inyectados en una
+# subred (VNet integration) son notoriamente lentos/inestables para que Azure les asigne la IP --
+# 'az container create' puede devolver antes de que ipAddress.ip este poblado. Reintenta con
+# timeout en vez de propagar un valor vacio.
+wait_for_ip() {
+  local name="$1"
+  local max_tries=30 tries=0 ip=""
+  until [[ -n "$ip" ]] || (( tries >= max_tries )); do
+    ip="$(az container show --resource-group "$RG" --name "$name" --query ipAddress.ip --output tsv 2>/dev/null || true)"
+    if [[ -z "$ip" ]]; then
+      tries=$((tries + 1))
+      echo "  ... ${name} sin IP todavia (intento ${tries}/${max_tries}), esperando 10s" >&2
+      sleep 10
+    fi
+  done
+  if [[ -z "$ip" ]]; then
+    echo "[ERROR] ${name}: no se pudo obtener IP tras $((max_tries * 10 / 60)) min. Revisa:" >&2
+    echo "  az container show -g ${RG} -n ${name} --query \"{estado:instanceView.state, ip:ipAddress.ip}\" -o table" >&2
+    echo "  az container logs -g ${RG} -n ${name}" >&2
+    exit 1
+  fi
+  echo "$ip"
+}
+
+# Despliega un container group desde un YAML y devuelve su IP privada por stdout (con reintentos).
 # Los echo de progreso van al llamador, no aquí, para no contaminar la captura por $(...).
 deploy_container() {
   local file="$1"
-  az container create --resource-group "$RG" --file "$file" --query ipAddress.ip --output tsv
+  local name
+  name="$(basename "$file" .yaml)"
+  az container create --resource-group "$RG" --file "$file" --output none
+  wait_for_ip "$name"
 }
 
 # ---------------------------------------------------------------------------
@@ -99,6 +132,13 @@ create_vnet() {
 
   az network vnet subnet create --resource-group "$RG" --vnet-name "$VNET" \
     --name snet-mgmt --address-prefixes 10.99.0.0/24 --output none
+
+  # DMZ paralela para servicios que no corren en ACI (ver docs/plans/wiki-on-vm.md): a diferencia
+  # de snet-dmz-shared, esta NO se delega a ACI, así que admite VMs. dmz-wiki/dmz-wiki-db migran
+  # aquí (docker-compose en una VM) el día que haya cuota de VM -- por ahora la subred solo queda
+  # creada y vacía, no bloquea nada del flujo actual.
+  az network vnet subnet create --resource-group "$RG" --vnet-name "$VNET" \
+    --name snet-dmz-vm --address-prefixes 10.51.0.0/24 --output none
 
   echo "Subredes base creadas (snet-team<N> se crean con 'add-team <N>')."
 }
@@ -233,11 +273,83 @@ deploy_team() {
 # Estado y destrucción
 # ---------------------------------------------------------------------------
 
+# ---------------------------------------------------------------------------
+# Funciones — VM del wiki (snet-dmz-vm, 10.51.0.0/24)
+# ---------------------------------------------------------------------------
+#
+# NO PROBADO. Ver docs/plans/wiki-on-vm.md -- escrito mientras la cuenta no tiene cuota de VM
+# aprobada (Microsoft.Compute en 0 para toda familia en eastus2, y Azure for Students no es
+# elegible para pedir aumento de quota ni por soporte). No correr esperando que funcione a la
+# primera; revisar contra la realidad la primera vez que haya cuota disponible.
+create_wiki_vm() {
+  local vm_size="${WIKI_VM_SIZE:-Standard_D2s_v7}"
+
+  echo "== VM del wiki: NO PROBADO, ver docs/plans/wiki-on-vm.md =="
+  echo "== Generando docker-compose (yamls/generate-wiki-vm.sh) =="
+  "${YAMLS_DIR}/generate-wiki-vm.sh"
+
+  echo "== az vm create: vm-wiki (${vm_size}, snet-dmz-vm, sin IP publica) =="
+  az vm create \
+    --resource-group "$RG" \
+    --name vm-wiki \
+    --image Ubuntu2204 \
+    --size "$vm_size" \
+    --vnet-name "$VNET" \
+    --subnet snet-dmz-vm \
+    --admin-username azureuser \
+    --generate-ssh-keys \
+    --public-ip-address "" \
+    --nsg "" \
+    --custom-data "${YAMLS_DIR}/wiki-vm/cloud-init.yaml" \
+    --output table
+
+  echo "== Esperando a que Docker quede listo (cloud-init) =="
+  local tries=0 max_tries=30
+  until az vm run-command invoke --resource-group "$RG" --name vm-wiki \
+          --command-id RunShellScript --scripts "docker version" \
+          --query "value[0].message" --output tsv 2>/dev/null | grep -q "Server:"; do
+    tries=$((tries + 1))
+    if (( tries >= max_tries )); then
+      echo "[ERROR] docker no quedó listo tras $((max_tries * 15 / 60)) min. Revisa manualmente:" >&2
+      echo "  az vm run-command invoke -g ${RG} -n vm-wiki --command-id RunShellScript --scripts 'cloud-init status --long'" >&2
+      exit 1
+    fi
+    echo "  ... docker aún no listo (intento ${tries}/${max_tries}), esperando 15s"
+    sleep 15
+  done
+
+  echo "== Copiando docker-compose.yml a la VM y desplegando (wiki + wiki-db) =="
+  local compose_b64
+  compose_b64="$(base64 -w0 "${YAMLS_DIR}/generated/wiki-vm-docker-compose.yml")"
+  az vm run-command invoke \
+    --resource-group "$RG" --name vm-wiki \
+    --command-id RunShellScript \
+    --scripts "mkdir -p /opt/wiki && echo '${compose_b64}' | base64 -d > /opt/wiki/docker-compose.yml && cd /opt/wiki && docker compose up -d" \
+    --output table
+
+  local vm_ip
+  vm_ip="$(az vm list-ip-addresses -g "$RG" -n vm-wiki --query "[0].virtualMachine.network.privateIpAddresses[0]" --output tsv)"
+  echo ""
+  echo "== VM del wiki desplegada (IP privada: ${vm_ip}) — NO VERIFICADO, revisar manualmente =="
+  echo "  az vm run-command invoke -g ${RG} -n vm-wiki --command-id RunShellScript --scripts 'docker compose -f /opt/wiki/docker-compose.yml ps'"
+}
+
 status() {
   echo "== Container groups en ${RG} =="
   az container list --resource-group "$RG" \
     --query "[].{nombre:name, estado:instanceView.state, ip:ipAddress.ip}" \
     --output table 2>/dev/null || echo "Sin container groups (o el RG no existe todavía)."
+}
+
+test_deploy() {
+  local team="${1:-1}"
+  echo "== TEST: infraestructura base + DMZ completa + team${team} =="
+  up
+  deploy_dmz
+  deploy_team "$team"
+  echo ""
+  echo "== TEST LISTO: DMZ completa + team${team} desplegados =="
+  status
 }
 
 down() {
@@ -255,13 +367,15 @@ down() {
 # Entrypoint
 # ---------------------------------------------------------------------------
 case "${1:-}" in
-  up)         up ;;
-  deploy-dmz) deploy_dmz ;;
-  add-team)   shift; deploy_team "${1:-}" ;;
-  status)     status ;;
-  down)       down ;;
+  up)            up ;;
+  deploy-dmz)    deploy_dmz ;;
+  add-team)      shift; deploy_team "${1:-}" ;;
+  deploy-wiki-vm) create_wiki_vm ;;
+  test)          shift; test_deploy "${1:-1}" ;;
+  status)        status ;;
+  down)          down ;;
   *)
-    echo "Uso: $0 {up|deploy-dmz|add-team <N>|status|down}"
+    echo "Uso: $0 {up|deploy-dmz|add-team <N>|deploy-wiki-vm|test [N]|status|down}"
     exit 1
     ;;
 esac
