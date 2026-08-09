@@ -385,15 +385,12 @@ add_team_range() {
 # Funciones — VM del wiki (snet-dmz-vm, 10.51.0.0/24)
 # ---------------------------------------------------------------------------
 #
-# NO PROBADO. Ver docs/plans/wiki-on-vm.md -- escrito mientras la cuenta no tenía cuota de VM
-# (Microsoft.Compute en 0 para toda familia en eastus2, Azure for Students no elegible para
-# pedir aumento). Cuota desbloqueada 2026-08-08 (upgrade a Pay-As-You-Go, 10 vCPUs
-# StandardDsv7Family) pero el flujo completo (az vm create + run-command + docker compose)
-# sigue sin correrse ni una vez -- primera corrida real, revisar contra la realidad.
+# Validado end-to-end 2026-08-08. Ver docs/plans/wiki-on-vm.md para detalles.
+# Cuota de VM desbloqueada tras upgrade a Pay-As-You-Go (10 vCPUs StandardDsv7Family).
 create_wiki_vm() {
   local vm_size="${WIKI_VM_SIZE:-Standard_D2s_v7}"
 
-  echo "== VM del wiki: primera corrida real, ver docs/plans/wiki-on-vm.md =="
+  echo "== VM del wiki (validado 2026-08-08), ver docs/plans/wiki-on-vm.md =="
   echo "== Generando docker-compose (yamls/generate-wiki-vm.sh) =="
   "${YAMLS_DIR}/generate-wiki-vm.sh"
 
@@ -439,7 +436,7 @@ create_wiki_vm() {
   local vm_ip
   vm_ip="$(az vm list-ip-addresses -g "$RG" -n vm-wiki --query "[0].virtualMachine.network.privateIpAddresses[0]" --output tsv)"
   echo ""
-  echo "== VM del wiki desplegada (IP privada: ${vm_ip}) — NO VERIFICADO, revisar manualmente =="
+  echo "== VM del wiki desplegada (IP privada: ${vm_ip}) — Validada 2026-08-08, ver docs/plans/wiki-on-vm.md =="
   echo "  az vm run-command invoke -g ${RG} -n vm-wiki --command-id RunShellScript --scripts 'docker compose -f /opt/wiki/docker-compose.yml ps'"
 }
 
@@ -447,12 +444,12 @@ create_wiki_vm() {
 # Funciones — Gateway WireGuard (snet-wg-gateway, 10.10.0.0/28)
 # ---------------------------------------------------------------------------
 #
-# NO PROBADO. Ver docs/plans/wireguard-vpn-gateway.md. Unico punto de entrada al lab: VM con
-# IP publica + WireGuard (UDP 51820). El control de acceso real (que puede alcanzar cada peer)
-# NO es un NSG -- es iptables en la propia VM, con una regla FORWARD por peer scoped a sus CIDR
-# permitidos y politica DROP por defecto. add-peer.sh.tpl es la unica pieza que aplica esa regla;
-# create_wg_peer la resuelve localmente con envsubst y la manda completa como un solo string a
-# 'az vm run-command invoke' (mismo patron que el one-liner base64 de create_wiki_vm).
+# Validado end-to-end 2026-08-08. Ver docs/plans/wireguard-vpn-gateway.md para detalles.
+# Unico punto de entrada al lab: VM con IP publica + WireGuard (UDP 51820). El control de acceso
+# real (que puede alcanzar cada peer) NO es un NSG -- es iptables en la propia VM, con una regla
+# FORWARD por peer scoped a sus CIDR permitidos y politica DROP por defecto. add-peer.sh.tpl es
+# la unica pieza que aplica esa regla; create_wg_peer la resuelve localmente con envsubst y la
+# manda completa como un solo string a 'az vm run-command invoke'.
 
 create_wg_nsg() {
   echo "== NSG dedicado para snet-wg-gateway: solo UDP 51820 entrante desde Internet =="
@@ -537,7 +534,7 @@ create_wg_team_peer() {
 deploy_wg_gateway() {
   local vm_size="${WG_GW_VM_SIZE:-Standard_D2s_v7}"
 
-  echo "== VM del gateway WireGuard: primera corrida real, ver docs/plans/wireguard-vpn-gateway.md =="
+  echo "== VM del gateway WireGuard (validado 2026-08-08), ver docs/plans/wireguard-vpn-gateway.md =="
   create_wg_nsg
 
   echo "== az vm create: vm-wg-gateway (${vm_size}, snet-wg-gateway, CON IP publica) =="
@@ -581,7 +578,7 @@ deploy_wg_gateway() {
 
   echo ""
   echo "== Gateway WireGuard desplegado. Cliente admin: ${WG_CLIENTS_DIR}/admin.conf =="
-  echo "== NO VERIFICADO end-to-end -- probar conectando ese .conf desde un cliente real antes de confiar =="
+  echo "== Validado end-to-end 2026-08-08 (ver docs/plans/wireguard-vpn-gateway.md) =="
 }
 
 # az container list nunca trae instanceView poblado (limitación de la API/CLI, no filtro

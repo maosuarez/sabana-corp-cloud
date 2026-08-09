@@ -117,6 +117,31 @@ automáticamente: despliegan la dependencia primero, leen su IP con `az containe
 --query ipAddress.ip`, y la inyectan con `sed` en el YAML generado del dependiente antes de
 desplegarlo. Ver `yamls/README.md` para el detalle de ese orden si hay que depurarlo.
 
+## Decisión de diseño: paralelismo en add-team-range
+
+Desplegar un solo equipo (`add-team N`) es secuencial: subred → contenedores (con dependencias
+db→webapp→xss-bot) → túnel WireGuard. La operación es lenta por el pool de IPs esperando en ACI
+(~30s por 4 contenedores).
+
+`add-team-range <inicio> <fin> [paralelismo]` permite desplegar múltiples equipos concurrentes:
+
+- **Paso 1 (secuencial)**: crea todas las subredes de golpe (`add_team_subnet` para cada equipo).
+  Motivo: `az network vnet subnet create` concurrentes sobre la MISMA VNet chocan frecuentemente
+  con `409 AnotherOperationInProgress` — Azure no permite operaciones de subred paralelas en una
+  VNet.
+- **Paso 2 (paralelo, tope configurable)**: `deploy_team_workload` (generación YAML + deploy de
+  contenedores) de N equipos simultáneos, con tope de concurrencia vía job control bash
+  (`wait -n`). Este paso es lo lento: cada equipo espera sus 4 IPs (~30s), en paralelo los equipos
+  se aceleran (4 equipos × 30s secuencial = 2 min; en paralelo ÷ tope de 4 ≈ 30s).
+- **Paso 3 (secuencial)**: `create_wg_team_peer` por equipo para generar túneles WireGuard.
+  Motivo: los peers usan `az vm run-command invoke` contra la misma VM (`vm-wg-gateway`), que
+  ejecuta `add-peer.sh.tpl` de forma serial — correrlos en paralelo arriesga corromper la config
+  compartida (`/etc/wireguard/wg0.conf`).
+
+Ejemplo: `./lab-azure.sh add-team-range 1 20 4` crea 20 equipos con 4 en paralelo (vs. 20×
+secuencial): subnets ~5s (paso 1), workloads ~2-3 min (paso 2 en paralelo), peers ~20s (paso 3),
+total ~3 min vs. ~10 min secuencial.
+
 ## Arquitectura de red objetivo
 
 **vnet-ctf-lab** (`10.0.0.0/8`) — red sin internet, alcanzable solo tras el portal cautivo +
@@ -145,8 +170,8 @@ VPN.
   automáticamente el túnel de ese equipo (acceso solo a su propia `snet-teamN` + ambas DMZ) y un
   `.conf` en `yamls/generated/wg-clients/`; hay además un túnel admin con acceso a todo
   `10.0.0.0/8`. El control de acceso por túnel se aplica con `iptables` en la propia VM, no con
-  NSGs (más detalle y estado de pruebas en `docs/plans/wireguard-vpn-gateway.md`, **NO PROBADO
-  todavía**).
+  NSGs (más detalle, validación end-to-end y estado de pruebas en `docs/plans/wireguard-vpn-gateway.md`,
+  **validado end-to-end 2026-08-08**).
 
 Nota de implementación vs. arquitectura original: File-Srv/Wiki-Int/decoys/Parqueadero se
 describieron inicialmente como parte de la red de cada equipo, pero el repo `sabana-corp-dmz` los
@@ -154,22 +179,27 @@ implementó como un único despliegue compartido en `snet-dmz-shared` (ver
 `../sabana-corp-dmz/README.md`). Se siguió esa implementación real en vez de la descripción
 original — si se decide separarlos por equipo más adelante, hay que revisar esta sección.
 
-Conector VPN: en diseño/implementación, ver `docs/plans/wireguard-vpn-gateway.md` (NO PROBADO
-todavía contra Azure real). Dentro de la VNet, el acceso entre subredes sigue siendo libre
-albedrío total (Azure enruta entre subredes de la misma VNet por defecto, y no hay un solo NSG de
-segmentación creado sobre `snet-team*`/`snet-dmz-*`/`snet-mgmt`) — un equipo puede alcanzar la
-subred de otro equipo, o `snet-mgmt`, sin restricción, **si entra por fuera del gateway VPN**
-(ej. con acceso directo a `az`). Propuesta de reglas para cerrar eso a nivel de subred (equipos
-aislados entre sí, nadie puede llegar a `snet-mgmt` salvo staff, DMZ no puede iniciar conexiones
-hacia equipos) documentada en `docs/plans/network-segmentation-nsgs.md` — **no implementada
-todavía**, solo diseño; es un control complementario al del gateway VPN, no un prerrequisito.
+Conector VPN: implementado y validado end-to-end 2026-08-08, ver `docs/plans/wireguard-vpn-gateway.md`.
+Dentro de la VNet, el acceso entre subredes sigue siendo libre albedrío total (Azure enruta entre
+subredes de la misma VNet por defecto, y no hay un solo NSG de segmentación creado sobre
+`snet-team*`/`snet-dmz-*`/`snet-mgmt`) — un equipo puede alcanzar la subred de otro equipo, o
+`snet-mgmt`, sin restricción, **si entra por fuera del gateway VPN** (ej. con acceso directo a `az`).
+Propuesta de reglas para cerrar eso a nivel de subred (equipos aislados entre sí, nadie puede
+llegar a `snet-mgmt` salvo staff, DMZ no puede iniciar conexiones hacia equipos) documentada en
+`docs/plans/network-segmentation-nsgs.md` — **no implementada todavía**, solo diseño; es un
+control complementario al del gateway VPN, no un prerrequisito.
 
 ## Notas de archivos
 
 - `lab-azure.sh` — orquesta todo el ciclo de vida: infraestructura base (`up`), DMZ
-  (`deploy-dmz`), equipos (`add-team <N>`), estado (`status`) y destrucción (`down`). Llama a los
-  generadores de `yamls/` y resuelve las dependencias de IP entre contenedores.
+  (`deploy-dmz`), equipos (`add-team <N>`, `add-team-range`), wiki-vm (`deploy-wiki-vm`), gateway
+  VPN (`deploy-wg-gateway`), estado (`status`) y destrucción (`down`). Llama a los generadores de
+  `yamls/` y resuelve las dependencias de IP entre contenedores. Implementa paralelismo configurable
+  en `add-team-range` (subnets secuenciales, workloads paralelos, peers secuenciales).
 - `.env` — `DOCKERHUB_USER` / `DOCKERHUB_TOKEN`; el script no lo carga automáticamente, hay que
   exportar las variables a mano antes de correr cualquier comando que despliegue contenedores.
-- `yamls/` — plantillas, generadores y documentación del despliegue por contenedor (ver
-  `yamls/README.md` para el detalle).
+- `yamls/` — plantillas, generadores y documentación del despliegue por contenedor. Incluye:
+  - `templates/*.yaml.tpl` + `generate-*.sh` para DMZ/equipos/wiki-vm/clientes WireGuard
+  - `wg-gateway/` — VM cloud-init, scripts remotos para gestión de peers del gateway
+  - `generated/` (gitignored) — YAML resueltos y clientes WireGuard generados
+  Ver `yamls/README.md` para el detalle.
