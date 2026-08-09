@@ -2,6 +2,26 @@
 
 ## Estado
 
+**Validado end-to-end 2026-08-08.** Cuota desbloqueada tras upgrade a Pay-As-You-Go
+(`StandardDsv7Family`, 10 vCPUs en eastus2). `./lab-azure.sh deploy-wiki-vm` corrido con
+éxito: `vm-wiki` (`Standard_D2s_v7`, `snet-dmz-vm`, IP `10.51.0.4`) desplegada, cloud-init
+instaló Docker, `docker compose up -d` levantó `wiki` (Up, sin restart) y `wiki-db`
+(healthy) — s6-overlay arranca bien con PID 1 real, confirmando el diagnóstico de por qué
+fallaba en ACI. `curl http://localhost` en la VM devuelve 302 (redirect a `/login`,
+comportamiento normal de BookStack). Riesgo pendiente de la sección anterior también
+verificado: routing cross-subnet `snet-dmz-vm` → `snet-dmz-shared` funciona sin NSGs
+(ping y `curl` a `dmz-filesrv:8080` desde la VM devuelven 200/OK).
+
+`lab-azure.sh:deploy_dmz()` ya no despliega `dmz-wiki`/`dmz-wiki-db` como contenedores
+ACI (se quitaron del loop de despliegue) — el wiki vive solo en `vm-wiki` ahora.
+
+Pendiente real: `az vm run-command invoke` sí funcionó (no hubo que caer a SSH +
+`nsg-jumpbox`). Falta solo validar el wiki desde un navegador real (vía el flujo VPN, aún
+sin implementar) y decidir si la VM se apaga fuera de horarios de prueba
+(`az vm deallocate`) para no acumular costo.
+
+Histórico (bloqueo ya resuelto, se deja para contexto):
+
 Scripts escritos (`yamls/templates/wiki-vm-compose.yml.tpl`, `yamls/generate-wiki-vm.sh`,
 `yamls/wiki-vm/cloud-init.yaml`, `lab-azure.sh deploy-wiki-vm`) pero **NO PROBADOS ni una
 vez** — el bloqueo de cuota (ver abajo) resultó ser más duro de lo que parecía al escribir

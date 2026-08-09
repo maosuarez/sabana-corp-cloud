@@ -42,9 +42,8 @@ interna") — este doc es donde se cierra ese pendiente con una propuesta concre
   válido es en la dirección contraria (staff/monitoring iniciando hacia equipos y DMZ
   para scraping, health checks, etc.).
 - **`snet-wg-gateway` es la puerta de entrada** — recibe tráfico de clientes VPN desde
-  internet y lo enruta hacia adentro. Su política depende del diseño de VPN, que sigue
-  sin decidirse (ver `CLAUDE.md`: "conector VPN hacia la nube... no asumir forma") — no
-  se detalla aquí más allá de dejar la nota.
+  internet y lo enruta hacia adentro. **Resuelto en `docs/plans/wireguard-vpn-gateway.md`**
+  (2026-08-08): el control de acceso ahí no se implementa como NSG (ver nota bajo la matriz).
 
 ## Matriz de reglas propuesta
 
@@ -77,7 +76,8 @@ Notas sobre la matriz:
   amplia. Si esto resulta demasiado permisivo cuando se implemente Monitor/Provisioner
   de verdad, revisar (podría acotarse a los puertos específicos de scraping en vez de
   "todo").
-- **snet-wg-gateway**: sin definir todavía — depende del diseño de VPN pendiente.
+- **snet-wg-gateway**: fila/columna deliberadamente en blanco — el control de acceso de los
+  clientes VPN no se modela en esta matriz. Ver nota debajo.
 
 ## Notas de implementación (para cuando se decida aplicar esto)
 
@@ -106,9 +106,16 @@ Notas sobre la matriz:
 
 ## Abierto / no decidido
 
-- Política de `snet-wg-gateway` — depende de cómo se diseñe el conector VPN (qué rango
-  de IP interna reciben los clientes VPN, si el gateway hace NAT o enruta 1:1, etc.).
-  No especular aquí; retomar cuando exista un plan de VPN.
+- ~~Política de `snet-wg-gateway`~~ — **resuelto, no vía NSG.** El control de acceso de
+  los clientes VPN se implementa en el propio gateway (`vm-wg-gateway`): reglas
+  `iptables FORWARD` por IP de túnel WireGuard, con política `DROP` por defecto — no en
+  una NSG de subred. Motivo: esta matriz es de grano por-subred, y el control que
+  necesita la VPN es por-peer (dos equipos comparten la "clase" `snet-team<N>` pero
+  deben tener acceso mutuamente exclusivo, algo que un NSG de subred no expresa sin
+  duplicar por completo el ciclo de vida de `add-team`). Ver
+  `docs/plans/wireguard-vpn-gateway.md` para el diseño completo. El resto de esta matriz
+  (equipo↔equipo, DMZ→equipos, todo→mgmt) sigue sin implementarse y sigue aplicando tal
+  cual al tráfico *dentro* de la VNet que no pasa por el gateway.
 - Si Monitor/Provisioner terminan viviendo en `snet-mgmt` con necesidad de exponer un
   puerto hacia equipos (ej. Provisioner respondiendo a un webhook), la regla
   "`snet-mgmt → todo` sí, nadie → `snet-mgmt`" tendría que ganar una excepción
