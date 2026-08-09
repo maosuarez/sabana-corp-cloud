@@ -20,13 +20,15 @@ export DOCKERHUB_USER="..."
 export DOCKERHUB_TOKEN="..."   # Docker Hub -> Account Settings -> Security -> New Access Token
 cp yamls/.env.secrets.example yamls/.env.secrets   # solo la primera vez, editar flags/secretos reales
 
-./lab-azure.sh up            # RG + VNet + subredes base + delega snet-dmz-shared a ACI
-./lab-azure.sh deploy-dmz    # despliega los 15 contenedores compartidos de la DMZ
-./lab-azure.sh add-team 1    # crea snet-team1 y despliega sus 4 contenedores
-./lab-azure.sh add-team 2    # repetir por cada equipo adicional (mismo comando, distinto N)
-./lab-azure.sh test [N]      # atajo de prueba: up + deploy-dmz + add-team N (N=1 por defecto)
-./lab-azure.sh status        # lista todos los container groups del RG (nombre/estado/IP)
-./lab-azure.sh down          # borra el Resource Group completo (pide confirmación "si")
+./lab-azure.sh up                # RG + VNet + subredes base + delega snet-dmz-shared a ACI
+./lab-azure.sh deploy-dmz        # despliega los 13 contenedores compartidos de la DMZ (wiki aparte, ver abajo)
+./lab-azure.sh deploy-wiki-vm    # crea vm-wiki (wiki+wiki-db via docker-compose) en snet-dmz-vm
+./lab-azure.sh deploy-wg-gateway # crea vm-wg-gateway (WireGuard, IP pública) + túnel admin en snet-wg-gateway
+./lab-azure.sh add-team 1        # crea snet-team1, despliega sus 4 contenedores y su túnel WireGuard
+./lab-azure.sh add-team 2        # repetir por cada equipo adicional (mismo comando, distinto N)
+./lab-azure.sh test [N]          # atajo de prueba: up + deploy-dmz + add-team N (N=1 por defecto, sin VPN)
+./lab-azure.sh status            # estado de DMZ, DMZ-VM, gateway WireGuard y equipos
+./lab-azure.sh down              # borra el Resource Group completo (pide confirmación "si")
 ```
 
 Prerrequisitos: `az` CLI instalado y logueado (`az login`) contra la suscripción "Azure for
@@ -133,7 +135,13 @@ VPN.
   en ACI (s6-overlay exige PID 1, ACI+VNet no lo garantiza) — migra aquí vía VM + docker-compose
   el día que haya cuota de VM. No puede ir en `snet-dmz-shared` porque esa subred está delegada a
   `Microsoft.ContainerInstance/containerGroups` (delegación exclusiva, no admite VMs).
-- **snet-wg-gateway** (`10.10.0.0/28`) — gateway WireGuard, creada por `up`, sin servicio todavía
+- **snet-wg-gateway** (`10.10.0.0/28`) — única entrada al lab: `vm-wg-gateway` (IP pública,
+  WireGuard UDP 51820), creada por `./lab-azure.sh deploy-wg-gateway`. `add-team <N>` genera
+  automáticamente el túnel de ese equipo (acceso solo a su propia `snet-teamN` + ambas DMZ) y un
+  `.conf` en `yamls/generated/wg-clients/`; hay además un túnel admin con acceso a todo
+  `10.0.0.0/8`. El control de acceso por túnel se aplica con `iptables` en la propia VM, no con
+  NSGs (más detalle y estado de pruebas en `docs/plans/wireguard-vpn-gateway.md`, **NO PROBADO
+  todavía**).
 
 Nota de implementación vs. arquitectura original: File-Srv/Wiki-Int/decoys/Parqueadero se
 describieron inicialmente como parte de la red de cada equipo, pero el repo `sabana-corp-dmz` los
@@ -141,12 +149,15 @@ implementó como un único despliegue compartido en `snet-dmz-shared` (ver
 `../sabana-corp-dmz/README.md`). Se siguió esa implementación real en vez de la descripción
 original — si se decide separarlos por equipo más adelante, hay que revisar esta sección.
 
-Pendiente, sin diseño aún: conector VPN hacia la nube (paso posterior, no asumir forma). Hoy el
-acceso entre subredes de la VNet es libre albedrío total (Azure enruta entre subredes de la misma
-VNet por defecto, y no hay un solo NSG creado) — un equipo puede alcanzar la subred de otro
-equipo, o `snet-mgmt`, sin restricción. Propuesta de reglas (equipos aislados entre sí, nadie
-puede llegar a `snet-mgmt` salvo staff, DMZ no puede iniciar conexiones hacia equipos) documentada
-en `docs/plans/network-segmentation-nsgs.md` — **no implementada todavía**, solo diseño.
+Conector VPN: en diseño/implementación, ver `docs/plans/wireguard-vpn-gateway.md` (NO PROBADO
+todavía contra Azure real). Dentro de la VNet, el acceso entre subredes sigue siendo libre
+albedrío total (Azure enruta entre subredes de la misma VNet por defecto, y no hay un solo NSG de
+segmentación creado sobre `snet-team*`/`snet-dmz-*`/`snet-mgmt`) — un equipo puede alcanzar la
+subred de otro equipo, o `snet-mgmt`, sin restricción, **si entra por fuera del gateway VPN**
+(ej. con acceso directo a `az`). Propuesta de reglas para cerrar eso a nivel de subred (equipos
+aislados entre sí, nadie puede llegar a `snet-mgmt` salvo staff, DMZ no puede iniciar conexiones
+hacia equipos) documentada en `docs/plans/network-segmentation-nsgs.md` — **no implementada
+todavía**, solo diseño; es un control complementario al del gateway VPN, no un prerrequisito.
 
 ## Notas de archivos
 

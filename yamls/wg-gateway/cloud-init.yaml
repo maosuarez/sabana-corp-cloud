@@ -1,0 +1,47 @@
+#cloud-config
+# NO PROBADO -- ver docs/plans/wireguard-vpn-gateway.md. Instala WireGuard al primer arranque de
+# vm-wg-gateway. No crea ningun [Peer] aqui -- los peers (admin, team<N>) se agregan despues,
+# incrementalmente, via yamls/wg-gateway/remote/add-peer.sh.tpl corrido por lab-azure.sh a traves
+# de 'az vm run-command invoke'. Riesgo sin confirmar: se asume que la interfaz de red que mira a
+# la VNet se llama 'eth0' (convencion habitual de las imagenes Ubuntu de Azure, pero no verificada
+# contra esta imagen puntual) -- si el nombre real difuere, el MASQUERADE de abajo no aplica a
+# nada y el trafico de los clientes VPN nunca sale de la VM. Verificar con 'ip route' antes de
+# confiar en que el PostUp de mas abajo funciona.
+package_update: true
+packages:
+  - wireguard
+  - wireguard-tools
+  - iptables-persistent
+  - qrencode
+
+write_files:
+  - path: /etc/sysctl.d/99-wg-forward.conf
+    content: |
+      net.ipv4.ip_forward=1
+
+  - path: /etc/wireguard/wg0.conf
+    permissions: '0600'
+    content: |
+      [Interface]
+      Address = 10.200.0.1/16
+      ListenPort = 51820
+      # La regla RELATED,ESTABLISHED es obligatoria: las reglas por-peer que agrega
+      # add-peer.sh.tpl solo permiten "source=<tunnel_ip> -> dest=<cidrs>" (la ida). La
+      # respuesta llega ya des-enmascarada por conntrack (source=<destino real>, dest=<tunnel_ip>)
+      # y no matchea esa regla -- sin esto, cada conexion se cae despues del primer paquete
+      # (confirmado en la primera corrida real, 2026-08-08: contador de DROP subia mientras el
+      # de ACCEPT del peer admin quedaba estancado).
+      PostUp   = iptables -t nat -A POSTROUTING -o eth0 -j MASQUERADE; iptables -A FORWARD -m state --state RELATED,ESTABLISHED -j ACCEPT; iptables -P FORWARD DROP
+      PostDown = iptables -t nat -D POSTROUTING -o eth0 -j MASQUERADE
+
+runcmd:
+  # El keypair del servidor se genera aqui, no solo en init-server-keys.sh: wg-quick exige
+  # PrivateKey definido en [Interface] para poder levantar la interfaz, asi que sin esto
+  # 'systemctl enable --now wg-quick@wg0' fallaria en el primer boot (wg0.conf sin PrivateKey
+  # todavia). init-server-keys.sh sigue existiendo para el caso idempotente de volver a pedir el
+  # PUBKEY despues, no para la generacion inicial.
+  - umask 077 && wg genkey | tee /etc/wireguard/server_private.key | wg pubkey > /etc/wireguard/server_public.key
+  - sed -i "/^\[Interface\]/a PrivateKey = $(cat /etc/wireguard/server_private.key)" /etc/wireguard/wg0.conf
+  - sysctl --system
+  - systemctl enable --now wg-quick@wg0
+  - netfilter-persistent save
