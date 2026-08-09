@@ -10,8 +10,9 @@ sin salida a internet — se llega tras romper un portal cautivo y autenticarse 
 
 Estado actual: `lab-azure.sh` levanta la infraestructura base (RG, VNet, subredes) y orquesta el
 despliegue de la DMZ compartida y de N equipos usando los YAML de `yamls/`. La arquitectura
-completa (abajo) todavía no está implementada en su totalidad (CTFd, Provisioner, Monitor, VPN
-faltan) — este archivo se va actualizando a medida que se toman decisiones de diseño.
+completa (abajo) todavía no está implementada en su totalidad (CTFd, Provisioner, Monitor faltan);
+VPN/gateway WireGuard está validado end-to-end desde 2026-08-08 — este archivo se va actualizando
+a medida que se toman decisiones de diseño.
 
 ## Comandos
 
@@ -26,6 +27,9 @@ cp yamls/.env.secrets.example yamls/.env.secrets   # solo la primera vez, editar
 ./lab-azure.sh deploy-wg-gateway # crea vm-wg-gateway (WireGuard, IP pública) + túnel admin en snet-wg-gateway
 ./lab-azure.sh add-team 1        # crea snet-team1, despliega sus 4 contenedores y su túnel WireGuard
 ./lab-azure.sh add-team 2        # repetir por cada equipo adicional (mismo comando, distinto N)
+./lab-azure.sh add-team-range 1 20   # despliega equipos 1..20 (secuencial, detiene en error)
+./lab-azure.sh add-team-range 1 20 4 # idem pero 4 equipos en paralelo (subnets/peers WG secuenciales)
+./lab-azure.sh wg-team-peer 1    # genera túnel WireGuard para team1 (para equipos desplegados antes del gateway)
 ./lab-azure.sh test [N]          # atajo de prueba: up + deploy-dmz + add-team N (N=1 por defecto, sin VPN)
 ./lab-azure.sh status            # estado de DMZ, DMZ-VM, gateway WireGuard y equipos
 ./lab-azure.sh down              # borra el Resource Group completo (pide confirmación "si")
@@ -33,7 +37,8 @@ cp yamls/.env.secrets.example yamls/.env.secrets   # solo la primera vez, editar
 
 Prerrequisitos: `az` CLI instalado y logueado (`az login`) contra la suscripción "Azure for
 Students" del tenant de la Universidad de la Sabana; `envsubst` (paquete `gettext-base`) para
-`yamls/generate-{team,dmz}.sh`.
+`yamls/generate-{team,dmz,wg-client}.sh`. Cliente WireGuard (paquete `wireguard-tools`) solo
+necesario en el operador para usar los `.conf` generados — no es prerrequisto del script.
 
 Diseño de `up`/`down`: todo el lab vive en un único Resource Group
 (`rg-ctf-semana-ingenieria-test`), así que "down" es un solo comando que lo destruye entero.
