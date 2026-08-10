@@ -1,7 +1,10 @@
 #!/usr/bin/env bash
 #
 # generate-dmz.sh — genera los YAML de ACI de la DMZ compartida a partir de
-# yamls/templates/dmz-*.yaml.tpl (filesrv, wiki-db, wiki, parking, 11 decoys).
+# yamls/templates/dmz-*.yaml.tpl (filesrv, parking, 11 decoys).
+#
+# El wiki no esta aqui: corre en vm-wiki con docker-compose (ver generate-wiki-vm.sh y
+# docs/plans/wiki-on-vm.md), no como contenedor ACI.
 #
 # A diferencia de team-*.yaml.tpl, estos no dependen de un numero de equipo -- son un solo
 # despliegue compartido por todos los equipos.
@@ -11,7 +14,7 @@
 #   export DOCKERHUB_TOKEN="..."
 #   ./generate-dmz.sh
 #
-# Escribe yamls/generated/dmz-*.yaml (14 archivos).
+# Escribe yamls/generated/dmz-*.yaml (13 archivos).
 
 set -euo pipefail
 
