@@ -9,10 +9,15 @@ Universidad de la Sabana. Todo corre en Azure Container Instances (ACI) dentro d
 sin salida a internet — se llega tras romper un portal cautivo y autenticarse por VPN.
 
 Estado actual: `lab-azure.sh` levanta la infraestructura base (RG, VNet, subredes) y orquesta el
-despliegue de la DMZ compartida y de N equipos usando los YAML de `yamls/`. La arquitectura
-completa (abajo) todavía no está implementada en su totalidad (CTFd, Provisioner, Monitor faltan);
-VPN/gateway WireGuard está validado end-to-end desde 2026-08-08 — este archivo se va actualizando
-a medida que se toman decisiones de diseño.
+despliegue de la DMZ compartida, la VM del wiki, el gateway WireGuard y N equipos usando los YAML
+de `yamls/`.
+
+**Todo lo implementado se probó end-to-end el 2026-08-08**: `up`, `deploy-dmz`, `deploy-wiki-vm`,
+`deploy-wg-gateway`, `add-team`/`add-team-range` y el flujo VPN completo. Cuando un comentario del
+código diga "validado 2026-08-08", se refiere a esa corrida. Lo que **no** está implementado ni
+probado es: CTFd, Provisioner y Monitor (sin imagen en ningún repo todavía) y los planes de
+`docs/plans/` marcados como diseño — `network-segmentation-nsgs.md`, `observability-monitoring.md`
+e `internal-dns.md`. Este archivo se va actualizando a medida que se toman decisiones de diseño.
 
 ## Comandos
 
@@ -96,26 +101,35 @@ generadores y despliega su salida — no hay que tocar `yamls/` a mano en el flu
 - **`templates/team-*.yaml.tpl`** (database, webapp, linux-server, xss-bot) — agnósticas al
   número de equipo vía `${TEAM}`; misma plantilla sirve para team1, team2, ..., teamN. Imágenes
   `maosuarez/sabana-lab-*:latest` (repo `../sabana-corp-network`), subred `snet-team${TEAM}`.
-- **`templates/dmz-*.yaml.tpl`** (filesrv, wiki-db, wiki, parking, 11 decoy-*) — un solo
+- **`templates/dmz-*.yaml.tpl`** (filesrv, parking, 11 decoy-*) — 13 contenedores, un solo
   despliegue compartido, no dependen de ningún equipo. Imágenes propias en Docker Hub
-  `maosuarez` (`sabanacorp-filesrv`, `sabanacorp-wikidb`, `sabanacorp-parking`,
-  `sabanacorp-decoy`), construidas a partir de `../sabana-corp-dmz` con el contenido del reto ya
-  horneado — salvo `wiki`, que sigue en `lscr.io/linuxserver/bookstack` (imagen pública genérica).
-  Subred fija `snet-dmz-shared`.
+  `maosuarez` (`sabanacorp-filesrv`, `sabanacorp-parking`, `sabanacorp-decoy`), construidas a
+  partir de `../sabana-corp-dmz` con el contenido del reto ya horneado. Subred fija
+  `snet-dmz-shared`. El wiki no está en ACI (ver `deploy-wiki-vm`); sus plantillas
+  `dmz-wiki*.yaml.tpl` fueron borradas porque se generaban sin desplegarse.
 
 Las flags/secretos de los servicios por equipo (`FLAG_*`, `PIVOT_SSH_PASSWORD`, `BOT_SECRET`,
 contraseñas de DB, `JWT_SIGNING_SECRET`) **son los mismos para todos los equipos** — vienen de
 `yamls/.env.secrets` (gitignored, plantilla en `.env.secrets.example`), nunca de `${TEAM}`.
 Decisión deliberada: CTFd valida una única flag por reto para cualquier equipo, así que cargarla
-una vez en CTFd sirve para las N instancias. Los secretos de la DMZ (wiki-db, parking) siguen
-como literales en su plantilla — la DMZ es un único despliegue, no N copias.
+una vez en CTFd sirve para las N instancias. Los secretos de la DMZ (parking en su plantilla, y
+los del wiki en `generate-wiki-vm.sh`) siguen como literales — la DMZ es un único despliegue, no
+N copias.
 
 ACI no da DNS entre container groups distintos, así que un contenedor que depende de la IP de
-otro (`webapp`→`database`, `xss-bot`→`webapp`, `wiki`→`wiki-db`) no puede usar el nombre del
-servicio como en docker-compose. `deploy_dmz`/`deploy_team` en `lab-azure.sh` resuelven esto
-automáticamente: despliegan la dependencia primero, leen su IP con `az container show/create
---query ipAddress.ip`, y la inyectan con `sed` en el YAML generado del dependiente antes de
-desplegarlo. Ver `yamls/README.md` para el detalle de ese orden si hay que depurarlo.
+otro (`webapp`→`database`, `xss-bot`→`webapp`) no puede usar el nombre del servicio como en
+docker-compose. `deploy_dmz`/`deploy_team` en `lab-azure.sh` resuelven esto automáticamente:
+despliegan la dependencia primero, leen su IP con `az container show/create --query
+ipAddress.ip`, y la inyectan con `sed` en el YAML generado del dependiente antes de desplegarlo.
+(El wiki dejó de necesitar esta inyección al migrar de ACI a una VM con docker-compose, donde
+la resolución de nombres entre servicios es nativa.) Ver `yamls/README.md` para el detalle de
+ese orden si hay que depurarlo.
+
+Hay un plan para montar DNS interno del lab (dnsmasq en `vm-wg-gateway`, FQDN para equipos y DMZ,
+resolución también desde el PC del participante por el túnel WireGuard) en
+`docs/plans/internal-dns.md` — **diseño, no implementado**, y pensado para ejecutarse *después* de
+que la DMZ completa esté montada. Ojo: ese plan no elimina el `sed` de IPs de arriba (el orden de
+despliegue lo sigue exigiendo), solo agrega nombres encima.
 
 ## Decisión de diseño: paralelismo en add-team-range
 
@@ -160,11 +174,11 @@ VPN.
   - Parqueadero — reto final (idem, DMZ compartida)
   - Lo que sí vive en `snet-teamX`: `database`, `webapp`, `linux-server`, `xss-bot` (retos 1-3 del edificio de cada equipo)
 - **snet-mgmt** (`10.99.0.0/24`) — red de gestión, creada por `up`, sin servicios todavía
-- **snet-dmz-vm** (`10.51.0.0/24`) — DMZ paralela para servicios que no corren en ACI (creada por
-  `up`, sin delegar, sin servicios todavía). Ver `docs/plans/wiki-on-vm.md`: `dmz-wiki` no arranca
-  en ACI (s6-overlay exige PID 1, ACI+VNet no lo garantiza) — migra aquí vía VM + docker-compose
-  el día que haya cuota de VM. No puede ir en `snet-dmz-shared` porque esa subred está delegada a
-  `Microsoft.ContainerInstance/containerGroups` (delegación exclusiva, no admite VMs).
+- **snet-dmz-vm** (`10.51.0.0/24`) — DMZ paralela para servicios que no corren en ACI. Hoy aloja
+  `vm-wiki` (wiki + wiki-db vía docker-compose), migrada de ACI porque BookStack requiere PID 1
+  real (s6-overlay, limitación de ACI+VNet — validado end-to-end 2026-08-08). No puede ir en
+  `snet-dmz-shared` porque esa subred está delegada a `Microsoft.ContainerInstance/containerGroups`
+  (delegación exclusiva, no admite VMs). Ver `docs/plans/wiki-on-vm.md` para el detalle.
 - **snet-wg-gateway** (`10.10.0.0/28`) — única entrada al lab: `vm-wg-gateway` (IP pública,
   WireGuard UDP 51820), creada por `./lab-azure.sh deploy-wg-gateway`. `add-team <N>` genera
   automáticamente el túnel de ese equipo (acceso solo a su propia `snet-teamN` + ambas DMZ) y un

@@ -1,12 +1,10 @@
 #cloud-config
-# NO PROBADO -- ver docs/plans/wireguard-vpn-gateway.md. Instala WireGuard al primer arranque de
-# vm-wg-gateway. No crea ningun [Peer] aqui -- los peers (admin, team<N>) se agregan despues,
-# incrementalmente, via yamls/wg-gateway/remote/add-peer.sh.tpl corrido por lab-azure.sh a traves
-# de 'az vm run-command invoke'. Riesgo sin confirmar: se asume que la interfaz de red que mira a
-# la VNet se llama 'eth0' (convencion habitual de las imagenes Ubuntu de Azure, pero no verificada
-# contra esta imagen puntual) -- si el nombre real difuere, el MASQUERADE de abajo no aplica a
-# nada y el trafico de los clientes VPN nunca sale de la VM. Verificar con 'ip route' antes de
-# confiar en que el PostUp de mas abajo funciona.
+# Validado end-to-end 2026-08-08 -- ver docs/plans/wireguard-vpn-gateway.md. Instala WireGuard al
+# primer arranque de vm-wg-gateway. No crea ningun [Peer] aqui -- los peers (admin, team<N>) se
+# agregan despues, incrementalmente, via yamls/wg-gateway/remote/add-peer.sh.tpl corrido por
+# lab-azure.sh a traves de 'az vm run-command invoke'. El nombre de interfaz 'eth0' que asume el
+# MASQUERADE de mas abajo quedo confirmado contra la imagen Ubuntu real de esta VM en esa misma
+# validacion (el trafico de los clientes VPN sale correctamente).
 package_update: true
 packages:
   - wireguard

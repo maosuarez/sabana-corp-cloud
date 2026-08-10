@@ -1,7 +1,7 @@
 #cloud-config
-# NO PROBADO -- ver docs/plans/wiki-on-vm.md. Instala Docker Engine + plugin compose en la VM al
-# primer arranque, via el script oficial de Docker (necesita salida a internet desde snet-dmz-vm;
-# no confirmado que esa subred la tenga -- ver nota de riesgo en el plan).
+# Validado end-to-end 2026-08-08 -- ver docs/plans/wiki-on-vm.md. Instala Docker Engine + plugin
+# compose en la VM al primer arranque, via el script oficial de Docker. La salida a internet desde
+# snet-dmz-vm (que este script necesita) quedo confirmada en esa validacion.
 package_update: true
 packages:
   - ca-certificates

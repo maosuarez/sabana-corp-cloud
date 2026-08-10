@@ -1,25 +1,25 @@
 # Sabana Corp: CTF infraestructura como código
 
-Infraestructura automática para **Sabana Corp**, el Capture The Flag de la Semana de Ingeniería de la Universidad de la Sabana. Todos los servicios corren en **Azure Container Instances** dentro de una VNet privada sin acceso directo a internet — se alcanza tras autenticarse en un portal cautivo y conectar por VPN (el conector VPN no está implementado todavía).
+Infraestructura automática para **Sabana Corp**, el Capture The Flag de la Semana de Ingeniería de la Universidad de la Sabana. Todos los servicios corren en **Azure Container Instances** dentro de una VNet privada sin acceso directo a internet — se alcanza tras autenticarse en un portal cautivo y conectar por VPN (WireGuard, validado end-to-end 2026-08-08).
 
 ## Estado actual
 
 **Implementado y probado (agosto 2026):**
 - Infraestructura base: Resource Group, VNet (`10.0.0.0/8`), 6 subredes (delegadas/sin delegar según sea necesario)
-- 15 contenedores DMZ compartidos: filesrv, wiki, parking, wiki-db, 11 decoys — accesibles desde cualquier equipo
+- 13 contenedores DMZ compartidos en ACI: filesrv, parking, 11 decoys — accesibles desde cualquier equipo
+- Wiki + wiki-db en VM (`vm-wiki`, snet-dmz-vm, docker-compose) — validado end-to-end 2026-08-08
 - Contenedores por equipo: database, webapp, linux-server, xss-bot (4 contenedores × N equipos)
 - Cada contenedor recibe su propia IP privada dentro de su subred
 - Secretos y flags inyectados vía variables de entorno (mismo conjunto para todos los equipos, como requiere CTFd)
 - Resolución automática de IPs entre contenedores dependientes
+- **Gateway WireGuard** (`vm-wg-gateway`, snet-wg-gateway, IP pública, UDP 51820) con aislamiento de acceso por peer vía `iptables` — validado end-to-end 2026-08-08
 
-**No implementado / bloqueado:**
-- **Wiki en VM**: scripts escritos pero nunca ejecutados — bloqueado porque Azure for Students no permite pedir aumento de quota de VM (confirmado 2026-08-02, ni self-service ni por ticket de soporte)
+**No implementado:**
 - **CTFd, Provisioner, Monitor**: no están en ningún repo, solo documentados en la arquitectura
-- **Segmentación NSG**: diseño completado en `docs/plans/network-segmentation-nsgs.md`, no aplicado (hoy todas las subredes se ven entre sí sin restricción)
-- **Conector VPN**: arquitectura pendiente de decidir
-- **Persistencia de wiki**: BookStack en ACI pierde su configuración si el contenedor se reinicia (aceptable para un evento de un día, pero pendiente de validar Azure File Share si se necesita)
+- **Segmentación NSG**: diseño completado en `docs/plans/network-segmentation-nsgs.md`, no aplicado (hoy todas las subredes se ven entre sí sin restricción dentro de la VNet)
+- **Persistencia persistente de wiki en VM**: los volúmenes de docker-compose (`wiki_mariadb_data`, `wiki_bookstack_config`) usan discos locales de la VM. Si la VM se destruye, se pierden — para un lab persistente, implementar Azure File Share
 
-La infraestructura fue desplegada para prueba, validada exitosamente y luego destruida completamente el 2026-08-02 con `./lab-azure.sh down`.
+La infraestructura base fue desplegada para prueba el 2026-08-01/02, validada exitosamente, y luego destruida. El **2026-08-08 se probó end-to-end el despliegue completo de todo lo implementado** (`up`, `deploy-dmz`, `deploy-wiki-vm`, `deploy-wg-gateway`, `add-team`/`add-team-range` y el flujo VPN). Lo único sin probar es lo que aún no existe: CTFd/Provisioner/Monitor y los planes de `docs/plans/` marcados como diseño.
 
 ## Requisitos previos
 
@@ -42,31 +42,59 @@ cp yamls/.env.secrets.example yamls/.env.secrets
 
 ## Flujo de uso
 
+**Infraestructura base (obligatorio):**
 ```bash
-# Crear infraestructura base (RG, VNet, subredes, delegaciones)
-./lab-azure.sh up
-
-# Desplegar los 15 contenedores DMZ compartidos
-./lab-azure.sh deploy-dmz
-
-# Crear una subred para team1 y desplegar sus 4 contenedores
-./lab-azure.sh add-team 1
-
-# Repetir para cada equipo adicional
-./lab-azure.sh add-team 2
-./lab-azure.sh add-team 3
-# ... etc.
-
-# Ver estado de todos los containers groups (nombre, estado, IP privada)
-./lab-azure.sh status
-
-# Destruir todo (pide confirmación "si")
-./lab-azure.sh down
+./lab-azure.sh up                    # Crea RG, VNet, 6 subredes base, delega snet-dmz-shared a ACI
 ```
 
-**Atajo para pruebas rápidas:**
+**DMZ compartida:**
 ```bash
-./lab-azure.sh test [N]    # up + deploy-dmz + add-team N (N=1 si se omite)
+./lab-azure.sh deploy-dmz            # Despliega 13 contenedores en snet-dmz-shared (filesrv, parking, decoys)
+./lab-azure.sh deploy-wiki-vm        # Despliega vm-wiki en snet-dmz-vm con wiki+wiki-db via docker-compose
+```
+
+**Gateway VPN (opcional pero necesario si se requiere acceso remoto):**
+```bash
+./lab-azure.sh deploy-wg-gateway     # Crea vm-wg-gateway (IP pública, WireGuard UDP 51820)
+                                     # + genera client admin en yamls/generated/wg-clients/admin.conf
+                                     # Validado end-to-end 2026-08-08 (ver docs/plans/wireguard-vpn-gateway.md)
+```
+
+**Equipos (secuencial o paralelo):**
+```bash
+# Opción 1: agregar equipos uno por uno
+./lab-azure.sh add-team 1            # Crea snet-team1, despliega 4 contenedores, genera peer WireGuard
+./lab-azure.sh add-team 2            # Repite para cada equipo adicional
+./lab-azure.sh add-team 3
+
+# Opción 2: agregar múltiples equipos en un comando
+./lab-azure.sh add-team-range 1 20   # Despliega equipos 1..20 (secuencial, se detiene en error)
+
+# Opción 3: agregar equipos en paralelo (acelera la creación)
+./lab-azure.sh add-team-range 1 20 4 # Despliega equipos 1..20 con 4 en paralelo
+                                     # Subnets se crean secuenciales (evita 409 de Azure),
+                                     # contenedores se despliegan en paralelo,
+                                     # peers WireGuard se crean secuenciales
+                                     # (ver CLAUDE.md "Decisión de diseño: paralelismo en add-team-range")
+```
+
+**Backfill de peer WireGuard (si un equipo fue desplegado antes del gateway):**
+```bash
+./lab-azure.sh wg-team-peer 1        # Genera/aplica solo el peer WireGuard de team1
+                                     # Útil para equipos que se crearon antes de deploy-wg-gateway
+```
+
+**Estado y pruebas:**
+```bash
+./lab-azure.sh status                # Muestra estado de DMZ, DMZ-VM, gateway WireGuard, equipos
+./lab-azure.sh test [N]              # Atajo: up + deploy-dmz + add-team N (N=1 por defecto)
+                                     # Útil para pruebas rápidas sin gateway VPN
+```
+
+**Destrucción:**
+```bash
+./lab-azure.sh down                  # Destruye todo (borra el Resource Group completo)
+                                     # Pide confirmación explícita antes de borrar
 ```
 
 ## Estructura de archivos
@@ -83,28 +111,44 @@ No es documentación pública — es guía de contexto para mantenedores IA.
 ### `lab-azure.sh`
 Orquestación completa del ciclo de vida: crear/desplegar/destruir infraestructura.
 - Define variables (`RG`, `VNET`, `LOCATION`)
-- Funciones: `require_dockerhub_env()`, `wait_for_ip()`, `deploy_container()`, y comandos principales (`up`, `deploy-dmz`, `add-team`, `test`, `status`, `down`)
+- Comandos principales:
+  - `up` — infraestructura base (RG, VNet, subredes, delegaciones)
+  - `deploy-dmz` — 13 contenedores DMZ en ACI
+  - `deploy-wiki-vm` — VM con wiki+wiki-db (docker-compose)
+  - `deploy-wg-gateway` — VM con WireGuard + peer admin
+  - `add-team <N>` — crea equipo N (subred + 4 contenedores + peer WireGuard)
+  - `add-team-range <inicio> <fin> [paralelismo]` — crea múltiples equipos en paralelo (opcional)
+  - `wg-team-peer <N>` — genera solo el peer WireGuard de equipo N (backfill)
+  - `test [N]` — atajo para pruebas: up + deploy-dmz + add-team N
+  - `status` — muestra estado de toda la infraestructura
+  - `down` — destruye todo
 - Llama a los generadores de `yamls/` e inyecta IPs resueltas en los YAML antes de desplegar
 - Maneja reintentos y esperas para que ACI asigne IP privada (notoriamente lento cuando VNet está integrada)
+- Implementa paralelismo configurable en `add-team-range`: subnets secuenciales (evita 409 de Azure), contenedores paralelos (acelera), peers WireGuard secuenciales (evita corrupción de config compartida)
 
-Ver comentarios en la línea 1-40 del script para contexto histórico (primer prototipo vs. diseño actual de 1-YAML-por-contenedor).
+Ver comentarios en líneas 1-40 del script para contexto histórico (primer prototipo vs. diseño actual de 1-YAML-por-contenedor).
 
 ### `yamls/`
-Plantillas y generadores para los contenedores.
+Plantillas y generadores para contenedores, VMs y clientes VPN.
 - **`templates/*.yaml.tpl`**: plantillas con variables `${...}` (TEAM, DOCKERHUB_USER, DOCKERHUB_TOKEN, SUBSCRIPTION_ID, RESOURCE_GROUP, VNET)
   - `team-*.yaml.tpl` (database, webapp, linux-server, xss-bot) — una por equipo, agnósticas al número vía `${TEAM}`
-  - `dmz-*.yaml.tpl` (filesrv, wiki-db, wiki, parking, 11 decoy-*) — un solo despliegue compartido
+  - `dmz-*.yaml.tpl` (filesrv, parking, 11 decoy-*) — un solo despliegue compartido en ACI
 - **`generate-team.sh <N>` / `generate-dmz.sh`**: resuelven variables sobre plantillas → `generated/*.yaml` (gitignored, contiene secretos)
 - **`.env.secrets`** (gitignored, plantilla en `.env.secrets.example`): FLAGS, contraseñas de BD, JWT_SIGNING_SECRET — compartidos por todos los equipos (por diseño de CTFd)
-- **`generated/`** (gitignored): salida de los generadores, YAML con secretos ya resueltos
-- **`wiki-vm-compose.yml.tpl` / `generate-wiki-vm.sh` / `wiki-vm/`**: plan no probado para wiki en VM (bloqueado en quota)
+- **`generated/`** (gitignored): salida de los generadores, YAML con secretos ya resueltos, cliente WireGuard .conf
+- **`wiki-vm/`**: cloud-init y docker-compose para la VM wiki (validado end-to-end 2026-08-08, ver `docs/plans/wiki-on-vm.md`)
+- **`wg-gateway/`**: cloud-init, scripts remotos, y plantillas para el gateway WireGuard VM (validado end-to-end 2026-08-08, ver `docs/plans/wireguard-vpn-gateway.md`)
+- **`generate-wg-client.sh`**: genera archivos `.conf` para clientes WireGuard (peers de equipos + admin)
 
-Ver `yamls/README.md` para detalles de orden de despliegue, resolución de IPs dependientes, y pendientes conocidos (persistencia de wiki, CTFd/Provisioner/Monitor no generados).
+Ver `yamls/README.md` para detalles de orden de despliegue, resolución de IPs dependientes, y generación de archivos.
 
 ### `docs/plans/`
-Diseños de características futuras:
-- **`wiki-on-vm.md`**: por qué BookStack no corre en ACI (s6-overlay/PID1), plan para mover wiki+wiki-db a una VM con docker-compose, y bloqueo actual (Azure for Students no elegible para aumentar quota de VM)
+Documentación de decisiones de diseño e implementación:
+- **`wiki-on-vm.md`**: por qué BookStack no corre en ACI (s6-overlay/PID1), plan e implementación de wiki+wiki-db en una VM con docker-compose (validado end-to-end 2026-08-08, cuota de VM desbloqueada tras upgrade a pay-as-you-go)
+- **`wireguard-vpn-gateway.md`**: diseño e implementación del gateway WireGuard (validado end-to-end 2026-08-08), incluyendo aislamiento de acceso por peer vía `iptables`
 - **`network-segmentation-nsgs.md`**: matriz de reglas NSG propuesta para aislar equipos entre sí y de la DMZ (diseño completado, no implementado), incluyendo notas de rollout
+- **`observability-monitoring.md`**: Prometheus + Grafana para el staff (diseño completado, no implementado)
+- **`internal-dns.md`**: DNS interno del lab con dnsmasq en `vm-wg-gateway`, FQDN para equipos/DMZ resolubles también desde el PC del participante por el túnel (diseño completado, no implementado — pensado para después de que la DMZ esté completa)
 
 ## Costos
 
@@ -127,11 +171,10 @@ Nota: `az consumption usage list` suele devolver `403 AuthorizationFailed` en su
 
 Documentado en detalle en `CLAUDE.md` y `yamls/README.md`. Resumen:
 
-1. **Sin persistencia de wiki entre reinicios**: BookStack en ACI perdería su config si se reinicia. Para un evento de un día está bien; para un lab persistente, implementar Azure File Share o mover a VM
-2. **Sin segmentación de red (NSG)**: hoy un equipo puede alcanzar otros equipos — diseño completado pero no aplicado (ver `docs/plans/network-segmentation-nsgs.md`)
-3. **Sin VPN**: acceso interno solo — falta el conector VPN hacia internet
-4. **Sin CTFd/Provisioner/Monitor**: no implementados, solo documentados en la arquitectura
-5. **Sin validación de ACI + capability NET_ADMIN para WireGuard**: plan alternativo a VM si se necesita gateway VPN en ACI (sin confirmar soporte)
+1. **Persistencia de wiki en VM limitada**: los volúmenes de docker-compose usan discos locales de la VM. Destruir la VM pierde datos — para un lab persistente, implementar Azure File Share
+2. **Sin segmentación de red (NSG)**: hoy un equipo puede alcanzar otros equipos (incluso dentro de la VNet sin pasar por VPN) — diseño completado pero no aplicado (ver `docs/plans/network-segmentation-nsgs.md`)
+3. **Sin CTFd/Provisioner/Monitor**: no implementados, solo documentados en la arquitectura
+4. **Sin validación de NSG asimétricos**: los NSGs aplicados hoy (solo al gateway WireGuard) son básicos; control de acceso más fino (equipos aislados, DMZ sin iniciar conexiones) requiere más validación
 
 ## Contribuir
 

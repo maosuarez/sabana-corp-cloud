@@ -1,8 +1,6 @@
 # docker-compose para la VM de snet-dmz-vm (ver docs/plans/wiki-on-vm.md).
 #
-# NO PROBADO. Escrito a ciegas mientras la cuenta no tiene cuota de VM aprobada -- no se ha
-# corrido ni una vez. Revisar contra la realidad la primera vez que haya cuota disponible, antes
-# de asumir que funciona tal cual.
+# Validado end-to-end 2026-08-08: desplegado en vm-wiki, wiki + wiki-db arrancan y se comunican.
 #
 # Adaptado de ../../../sabana-corp-dmz/docker-compose.yml (servicios wiki-db + wiki + red
 # wiki_backend), quitando lo que solo tenia sentido para un host que corre TODA la DMZ a la vez:
@@ -11,12 +9,11 @@
 #   - wiki publica el puerto 80 directo en la interfaz de la VM (0.0.0.0), no en 127.0.0.1 --
 #     tiene que ser alcanzable desde el resto de la VNet (snet-team<N>, snet-mgmt), no solo desde
 #     localhost.
-# Mismas imagenes propias que ya usa dmz-wiki.yaml.tpl / dmz-wiki-db.yaml.tpl (maosuarez/sabanacorp-wiki,
-# maosuarez/sabanacorp-wikidb) -- Dockerfile.app de sabanacorp-wiki es un FROM directo de
-# lscr.io/linuxserver/bookstack sin tocar, o sea que SI trae s6-overlay v3. En ACI eso crashea
-# (ver memoria aci_platform_limitations #1); en una VM con Docker normal, PID 1 real, debería
-# arrancar bien -- ese es exactamente el motivo de este plan, pero sigue siendo una hipotesis
-# hasta que se compruebe.
+# Imagenes propias maosuarez/sabanacorp-wiki y maosuarez/sabanacorp-wikidb -- Dockerfile.app de
+# sabanacorp-wiki es un FROM directo de lscr.io/linuxserver/bookstack sin tocar, o sea que SI trae
+# s6-overlay v3. En ACI eso crashea (ver memoria aci_platform_limitations #1); en esta VM, con
+# Docker normal y PID 1 real, arranca bien -- comprobado 2026-08-08. Ese era exactamente el motivo
+# de mover el wiki fuera de ACI.
 services:
   wiki-db:
     image: maosuarez/sabanacorp-wikidb:latest

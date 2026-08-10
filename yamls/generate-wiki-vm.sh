@@ -3,19 +3,17 @@
 # generate-wiki-vm.sh — genera el docker-compose.yml para la VM del wiki (snet-dmz-vm) a partir
 # de yamls/templates/wiki-vm-compose.yml.tpl.
 #
-# NO PROBADO -- ver docs/plans/wiki-on-vm.md. Escrito sin poder correrlo (cuenta sin cuota de VM
-# al momento de escribir esto). Revisar contra la realidad antes de confiar en que genera un
-# compose valido.
+# Validado end-to-end 2026-08-08 -- ver docs/plans/wiki-on-vm.md. El compose generado se desplego
+# en vm-wiki y BookStack arranco correctamente contra su MariaDB.
 #
 # Uso:
 #   ./generate-wiki-vm.sh
 #
 # Escribe yamls/generated/wiki-vm-docker-compose.yml
 #
-# Mismos valores de secretos que hoy usan dmz-wiki.yaml.tpl / dmz-wiki-db.yaml.tpl (literales, no
-# vienen de .env.secrets -- igual que el resto de la DMZ compartida, ver yamls/README.md
-# "Pendiente / gaps conocidos"). Si se cambia aca, hay que cambiar tambien alla o quedan
-# desincronizados mientras convivan ambos despliegues (ACI viejo vs VM nueva).
+# Los secretos del wiki son literales aca abajo, no vienen de .env.secrets -- igual que el resto
+# de la DMZ compartida (ver yamls/README.md "Pendiente / gaps conocidos"). Este es hoy el unico
+# lugar donde viven: las plantillas de ACI dmz-wiki*.yaml.tpl, que los duplicaban, ya no existen.
 
 set -euo pipefail
 

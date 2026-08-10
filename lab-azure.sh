@@ -27,8 +27,9 @@
 #   ./lab-azure.sh deploy-dmz    # despliega los 13 contenedores compartidos de la DMZ (sin wiki)
 #   ./lab-azure.sh deploy-wg-gateway # crea vm-wg-gateway en snet-wg-gateway (IP publica,
 #                                 # WireGuard UDP 51820) + peer admin -- correr antes del primer
-#                                 # add-team para que los equipos ya salgan con su tunel. NO
-#                                 # PROBADO todavia, ver docs/plans/wireguard-vpn-gateway.md
+#                                 # add-team para que los equipos ya salgan con su tunel.
+#                                 # Validado end-to-end 2026-08-08, ver
+#                                 # docs/plans/wireguard-vpn-gateway.md
 #   ./lab-azure.sh add-team 1    # crea snet-team1, despliega sus 4 contenedores y (si el gateway
 #                                 # ya existe) su peer WireGuard + yamls/generated/wg-clients/team1.conf
 #   ./lab-azure.sh add-team 2    # idem para team2 (repetir por cada equipo)
@@ -36,9 +37,10 @@
 #   ./lab-azure.sh add-team-range 1 20 4 # idem pero 4 equipos a la vez (subnets/peers WG siguen
 #                                 # secuenciales, ver add_team_range() para el porqué)
 #   ./lab-azure.sh deploy-wiki-vm # crea vm-wiki en snet-dmz-vm y levanta wiki+wiki-db via
-#                                 # docker-compose -- NO PROBADO todavía, ver docs/plans/wiki-on-vm.md
-#                                 # (cuota de VM desbloqueada 2026-08-08 tras upgrade a Pay-As-You-Go,
-#                                 # 10 vCPUs StandardDsv7Family en eastus2)
+#                                 # docker-compose -- validado end-to-end 2026-08-08, ver
+#                                 # docs/plans/wiki-on-vm.md (cuota de VM desbloqueada ese mismo
+#                                 # dia tras upgrade a Pay-As-You-Go, 10 vCPUs
+#                                 # StandardDsv7Family en eastus2)
 #   ./lab-azure.sh test [N]      # atajo: up + deploy-dmz + add-team N (N=1 si se omite) -- todo
 #                                # el laboratorio de una vez para pruebas rapidas (sin gateway VPN
 #                                # a proposito, ver nota en deploy_wg_gateway())
@@ -144,9 +146,9 @@ create_vnet() {
     --name snet-mgmt --address-prefixes 10.99.0.0/24 --output none
 
   # DMZ paralela para servicios que no corren en ACI (ver docs/plans/wiki-on-vm.md): a diferencia
-  # de snet-dmz-shared, esta NO se delega a ACI, así que admite VMs. dmz-wiki/dmz-wiki-db migran
-  # aquí (docker-compose en una VM) el día que haya cuota de VM -- por ahora la subred solo queda
-  # creada y vacía, no bloquea nada del flujo actual.
+  # de snet-dmz-shared, esta NO se delega a ACI, así que admite VMs. Aquí vive vm-wiki
+  # (wiki + wiki-db con docker-compose), desplegada por './lab-azure.sh deploy-wiki-vm' y
+  # validada end-to-end 2026-08-08.
   az network vnet subnet create --resource-group "$RG" --vnet-name "$VNET" \
     --name snet-dmz-vm --address-prefixes 10.51.0.0/24 --output none
 
@@ -200,12 +202,10 @@ deploy_dmz() {
 
   local gen="${YAMLS_DIR}/generated"
 
-  # dmz-wiki / dmz-wiki-db NO se despliegan aquí como contenedores ACI: BookStack
-  # (s6-overlay v3) exige PID 1 real, que ACI+VNet no garantiza -- confirmado
-  # determinísticamente (ExitCode 100, CrashLoopBackOff). Migrados a una VM con
-  # docker-compose vía './lab-azure.sh deploy-wiki-vm' (ver docs/plans/wiki-on-vm.md).
-  # generate-dmz.sh igual genera dmz-wiki.yaml/dmz-wiki-db.yaml a partir de sus plantillas
-  # (quedan sin usar) porque no vale la pena bifurcar el generador solo por esto.
+  # El wiki (BookStack + MariaDB) NO vive aquí: s6-overlay v3 exige PID 1 real, que ACI+VNet
+  # no garantiza -- confirmado determinísticamente (ExitCode 100, CrashLoopBackOff). Corre en
+  # vm-wiki con docker-compose vía './lab-azure.sh deploy-wiki-vm' (ver docs/plans/wiki-on-vm.md).
+  # Sus plantillas de ACI (dmz-wiki*.yaml.tpl) fueron borradas: no se desplegaban.
   local svc
   for svc in dmz-filesrv dmz-parking \
              dmz-decoy-printer dmz-decoy-nas dmz-decoy-legacy-web dmz-decoy-database \
