@@ -104,6 +104,18 @@ Notas sobre la matriz:
   que ya funciona, para poder aislar rápido cuál regla causó un problema si algo se
   rompe.
 
+## Nota: DNS interno (`docs/plans/internal-dns.md`, implementado)
+
+Si algún día se aplican los NSGs de este plan, **`snet-team*` y `snet-dmz-*` tienen que poder
+alcanzar `snet-wg-gateway` en UDP/TCP 53** — es donde vive dnsmasq (`10.10.0.4`). La matriz de
+arriba deja esa columna en blanco ("fuera de alcance"), lo que hoy es correcto porque no hay NSGs
+creados, pero se volvería un corte silencioso del DNS de todos los contenedores en cuanto alguien
+materialice esta matriz. Mismo aviso para un futuro NSG de `snet-wg-gateway`: si algún día su
+política pasa de la actual (sin NSG de subred, solo el `nsg-wg-gateway` que ya existe) a algo tipo
+`DenyVnetInBound`, hay que añadir antes una regla `allow-dns-inbound` (53 desde `VirtualNetwork`) o
+el gateway deja de resolver nombres para toda la VNet sin que nadie lo note hasta que alguien
+pregunte por qué `curl http://webapp.team3...` dejó de andar.
+
 ## Abierto / no decidido
 
 - ~~Política de `snet-wg-gateway`~~ — **resuelto, no vía NSG.** El control de acceso de

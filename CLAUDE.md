@@ -15,9 +15,16 @@ de `yamls/`.
 **Todo lo implementado se probó end-to-end el 2026-08-08**: `up`, `deploy-dmz`, `deploy-wiki-vm`,
 `deploy-wg-gateway`, `add-team`/`add-team-range` y el flujo VPN completo. Cuando un comentario del
 código diga "validado 2026-08-08", se refiere a esa corrida. Lo que **no** está implementado ni
-probado es: CTFd, Provisioner y Monitor (sin imagen en ningún repo todavía) y los planes de
-`docs/plans/` marcados como diseño — `network-segmentation-nsgs.md`, `observability-monitoring.md`
-e `internal-dns.md`. Este archivo se va actualizando a medida que se toman decisiones de diseño.
+probado es: CTFd, Provisioner y Monitor (sin imagen en ningún repo todavía) y `docs/plans/network-segmentation-nsgs.md`
+y `docs/plans/observability-monitoring.md`, ambos marcados como diseño. Este archivo se va
+actualizando a medida que se toman decisiones de diseño.
+
+**DNS interno (`docs/plans/internal-dns.md`): validado contra Azure real (2026-08-10).** dnsmasq en
+`vm-wg-gateway`, dominio `sabanacorp.internal`, comandos `dns-sync [--from-azure]` / `dns-check
+<fqdn>`. Fase 0 (assumption checks) y Fase 1 (dnsmasq en VM viva) completadas; zona completa
+sincronizada y verificada end-to-end. Caveat: contenedores desplegados antes de esta sesión
+(team1, team2, DMZ) no reciben `dnsConfig` todavía (requeriría recreación); nuevos deploys lo
+reciben automáticamente. Detalle completo en `docs/plans/internal-dns.md`.
 
 ## Comandos
 
@@ -35,6 +42,9 @@ cp yamls/.env.secrets.example yamls/.env.secrets   # solo la primera vez, editar
 ./lab-azure.sh add-team-range 1 20   # despliega equipos 1..20 (secuencial, detiene en error)
 ./lab-azure.sh add-team-range 1 20 4 # idem pero 4 equipos en paralelo (subnets/peers WG secuenciales)
 ./lab-azure.sh wg-team-peer 1    # genera túnel WireGuard para team1 (para equipos desplegados antes del gateway)
+./lab-azure.sh dns-sync          # empuja yamls/generated/dns/*.hosts al gateway (1 invocación, ya se llama sola)
+./lab-azure.sh dns-sync --from-azure # reconstruye la zona completa desde 'az container list' (reparación)
+./lab-azure.sh dns-check <fqdn>  # resuelve <fqdn> desde el gateway y lo compara con la IP real de Azure
 ./lab-azure.sh test [N]          # atajo de prueba: up + deploy-dmz + add-team N (N=1 por defecto, sin VPN)
 ./lab-azure.sh status            # estado de DMZ, DMZ-VM, gateway WireGuard y equipos
 ./lab-azure.sh down              # borra el Resource Group completo (pide confirmación "si")
@@ -147,14 +157,53 @@ db→webapp→xss-bot) → túnel WireGuard. La operación es lenta por el pool 
   contenedores) de N equipos simultáneos, con tope de concurrencia vía job control bash
   (`wait -n`). Este paso es lo lento: cada equipo espera sus 4 IPs (~30s), en paralelo los equipos
   se aceleran (4 equipos × 30s secuencial = 2 min; en paralelo ÷ tope de 4 ≈ 30s).
+- **Paso 2.5 (secuencial, un solo push)**: `sync_lab_dns` — sincroniza el DNS interno (ver
+  "Decisión de diseño: DNS interno" abajo) para todo el rango en **una** invocación de
+  `run-command`, no una por equipo. Va entre el paso 2 y el paso 3 por el mismo motivo que el
+  paso 3: toca `vm-wg-gateway`.
 - **Paso 3 (secuencial)**: `create_wg_team_peer` por equipo para generar túneles WireGuard.
   Motivo: los peers usan `az vm run-command invoke` contra la misma VM (`vm-wg-gateway`), que
   ejecuta `add-peer.sh.tpl` de forma serial — correrlos en paralelo arriesga corromper la config
   compartida (`/etc/wireguard/wg0.conf`).
 
+**Regla general, no solo de los peers**: TODA escritura sobre `vm-wg-gateway` va en un paso
+secuencial. No es solo corrupción de archivos — `az vm run-command invoke` corre a través de la
+extensión RunCommand de la VM, que es **de un solo hilo por VM**: invocaciones concurrentes contra
+la misma máquina se serializan o fallan con un conflicto de operación en curso. Esto aplica igual
+a los peers WireGuard (paso 3) y al DNS (paso 2.5) — cualquier función nueva que escriba en el
+gateway (vía `run-command`) tiene que sumarse a un paso secuencial existente o crear uno propio,
+nunca correr dentro del paso 2 paralelo.
+
 Ejemplo: `./lab-azure.sh add-team-range 1 20 4` crea 20 equipos con 4 en paralelo (vs. 20×
-secuencial): subnets ~5s (paso 1), workloads ~2-3 min (paso 2 en paralelo), peers ~20s (paso 3),
-total ~3 min vs. ~10 min secuencial.
+secuencial): subnets ~5s (paso 1), workloads ~2-3 min (paso 2 en paralelo), DNS ~10s (paso 2.5,
+O(1) no O(N)), peers ~20s (paso 3), total ~3 min vs. ~10 min secuencial.
+
+## Decisión de diseño: DNS interno con dnsmasq en el gateway
+
+Un único `dnsmasq` en `vm-wg-gateway` (no una VM aparte: es la única máquina que ya está en el
+camino de todos los clientes VPN y de la VNet), sirviendo una zona plana de registros A generados
+desde el estado real de Azure, reenviando todo lo demás a Azure DNS (`168.63.129.16`).
+
+- **Dominio `sabanacorp.internal`, explícitamente no `.local`**: `.local` está reservado por RFC
+  6762 para mDNS/Bonjour — en macOS (siempre) y en Linux con `avahi` (Ubuntu de escritorio, por
+  defecto), una consulta a `algo.local` se resuelve por multicast en la red local en vez de irse al
+  DNS configurado. Sería el peor bug posible para un evento: funciona en la máquina del operador,
+  falla al azar en el MacBook de un participante, sin nada en los logs. `.internal` es TLD
+  reservado por ICANN (2024) para uso privado, nunca se delega ni se intercepta.
+- **Zona plana, sin split-horizon**: todo el mundo resuelve todo (excepto `snet-mgmt`, que no se
+  publica). Descubrir `webapp.team7.sabanacorp.internal` es reconocimiento — sabor de CTF, no una
+  fuga — y el límite real ya existe y ya está probado: es `iptables` en el gateway (resuelve, no
+  alcanza), no el DNS.
+- **Punto más importante, para no descubrirlo por las malas después**: las variables de entorno de
+  los contenedores (`DB_HOST`, `WEBAPP_BASE_URL`) **se quedan en IP a propósito, con el `sed`
+  intacto**. El DNS es una capa de nombres para humanos/herramientas/navegación dentro del CTF, NO
+  el plano de datos de los retos. Si alguien "arregla" `<DATABASE_IP>` poniéndole un FQDN, el DNS
+  pasa de ser cosmético a ser dependencia dura de todos los retos, sin que nadie lo haya decidido
+  así — no lo hagas sin releer `docs/plans/internal-dns.md` ("El huevo y la gallina") primero.
+  Consecuencia directa: un dnsmasq caído no tumba ningún reto ya desplegado.
+- Comandos: `dns-sync [--from-azure]`, `dns-check <fqdn>`. Detalle completo, plan de pruebas,
+  matriz de riesgos y comportamiento por sistema operativo del cliente WireGuard (split-DNS real en
+  Windows/macOS, no-tan-real en Linux) en `docs/plans/internal-dns.md`.
 
 ## Arquitectura de red objetivo
 
@@ -179,13 +228,16 @@ VPN.
   real (s6-overlay, limitación de ACI+VNet — validado end-to-end 2026-08-08). No puede ir en
   `snet-dmz-shared` porque esa subred está delegada a `Microsoft.ContainerInstance/containerGroups`
   (delegación exclusiva, no admite VMs). Ver `docs/plans/wiki-on-vm.md` para el detalle.
-- **snet-wg-gateway** (`10.10.0.0/28`) — única entrada al lab: `vm-wg-gateway` (IP pública,
-  WireGuard UDP 51820), creada por `./lab-azure.sh deploy-wg-gateway`. `add-team <N>` genera
-  automáticamente el túnel de ese equipo (acceso solo a su propia `snet-teamN` + ambas DMZ) y un
-  `.conf` en `yamls/generated/wg-clients/`; hay además un túnel admin con acceso a todo
-  `10.0.0.0/8`. El control de acceso por túnel se aplica con `iptables` en la propia VM, no con
-  NSGs (más detalle, validación end-to-end y estado de pruebas en `docs/plans/wireguard-vpn-gateway.md`,
-  **validado end-to-end 2026-08-08**).
+- **snet-wg-gateway** (`10.10.0.0/28`) — única entrada al lab **y DNS interno del lab**:
+  `vm-wg-gateway` (IP pública, WireGuard UDP 51820, IP privada estática `10.10.0.4`), creada por
+  `./lab-azure.sh deploy-wg-gateway`. `add-team <N>` genera automáticamente el túnel de ese equipo
+  (acceso solo a su propia `snet-teamN` + ambas DMZ) y un `.conf` en `yamls/generated/wg-clients/`;
+  hay además un túnel admin con acceso a todo `10.0.0.0/8`. El control de acceso por túnel se
+  aplica con `iptables` en la propia VM, no con NSGs (más detalle, validación end-to-end y estado
+  de pruebas en `docs/plans/wireguard-vpn-gateway.md`, **validado end-to-end 2026-08-08**). Además
+  corre `dnsmasq` (dominio `sabanacorp.internal`, IP privada `10.10.0.4` para la VNet, IP de túnel
+  `10.200.0.1` para clientes VPN) — ver "Decisión de diseño: DNS interno" abajo y
+  `docs/plans/internal-dns.md`.
 
 Nota de implementación vs. arquitectura original: File-Srv/Wiki-Int/decoys/Parqueadero se
 describieron inicialmente como parte de la red de cada equipo, pero el repo `sabana-corp-dmz` los
@@ -207,13 +259,16 @@ control complementario al del gateway VPN, no un prerrequisito.
 
 - `lab-azure.sh` — orquesta todo el ciclo de vida: infraestructura base (`up`), DMZ
   (`deploy-dmz`), equipos (`add-team <N>`, `add-team-range`), wiki-vm (`deploy-wiki-vm`), gateway
-  VPN (`deploy-wg-gateway`), estado (`status`) y destrucción (`down`). Llama a los generadores de
-  `yamls/` y resuelve las dependencias de IP entre contenedores. Implementa paralelismo configurable
-  en `add-team-range` (subnets secuenciales, workloads paralelos, peers secuenciales).
+  VPN (`deploy-wg-gateway`), DNS interno (`dns-sync`, `dns-check`), estado (`status`) y destrucción
+  (`down`). Llama a los generadores de `yamls/` y resuelve las dependencias de IP entre
+  contenedores. Implementa paralelismo configurable en `add-team-range` (subnets secuenciales,
+  workloads paralelos, DNS en un solo push, peers secuenciales).
 - `.env` — `DOCKERHUB_USER` / `DOCKERHUB_TOKEN`; el script no lo carga automáticamente, hay que
   exportar las variables a mano antes de correr cualquier comando que despliegue contenedores.
 - `yamls/` — plantillas, generadores y documentación del despliegue por contenedor. Incluye:
   - `templates/*.yaml.tpl` + `generate-*.sh` para DMZ/equipos/wiki-vm/clientes WireGuard
-  - `wg-gateway/` — VM cloud-init, scripts remotos para gestión de peers del gateway
-  - `generated/` (gitignored) — YAML resueltos y clientes WireGuard generados
+  - `generate-dns-hosts.sh` — genera bloques de zona DNS (`generated/dns/*.hosts`)
+  - `wg-gateway/` — VM cloud-init (WireGuard + dnsmasq), scripts remotos para gestión de peers y
+    de la zona DNS del gateway
+  - `generated/` (gitignored) — YAML resueltos, clientes WireGuard generados y bloques de zona DNS
   Ver `yamls/README.md` para el detalle.

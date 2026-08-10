@@ -27,8 +27,9 @@ mkdir -p "$OUTDIR"
 export WIKI_MYSQL_ROOT_PASSWORD="rootpass"
 export WIKI_DB_PASSWORD="bookstackpass"
 export WIKI_APP_KEY="base64:LrA+08seUQX+vAK+resD+m79e2Gj68/pGXCr1kqm75M="
+export LAB_DOMAIN="${LAB_DOMAIN:-sabanacorp.internal}"
 
-VARS='${WIKI_MYSQL_ROOT_PASSWORD} ${WIKI_DB_PASSWORD} ${WIKI_APP_KEY}'
+VARS='${WIKI_MYSQL_ROOT_PASSWORD} ${WIKI_DB_PASSWORD} ${WIKI_APP_KEY} ${LAB_DOMAIN}'
 
 in="${TEMPLATES}/wiki-vm-compose.yml.tpl"
 out="${OUTDIR}/wiki-vm-docker-compose.yml"

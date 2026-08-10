@@ -20,6 +20,8 @@ set -euo pipefail
 
 RESOURCE_GROUP="${RESOURCE_GROUP:-rg-ctf-semana-ingenieria-test}"
 VNET="${VNET:-vnet-ctf-lab}"
+LAB_DOMAIN="${LAB_DOMAIN:-sabanacorp.internal}"
+LAB_DNS_SERVER="${LAB_DNS_SERVER:-}"
 : "${DOCKERHUB_USER:?Falta exportar DOCKERHUB_USER}"
 : "${DOCKERHUB_TOKEN:?Falta exportar DOCKERHUB_TOKEN}"
 SUBSCRIPTION_ID="${SUBSCRIPTION_ID:-$(az account show --query id --output tsv)}"
@@ -31,12 +33,16 @@ TEMPLATES="${WORKDIR}/templates"
 OUTDIR="${WORKDIR}/generated"
 mkdir -p "$OUTDIR"
 
-export RESOURCE_GROUP VNET DOCKERHUB_USER DOCKERHUB_TOKEN SUBSCRIPTION_ID
-VARS='${RESOURCE_GROUP} ${VNET} ${DOCKERHUB_USER} ${DOCKERHUB_TOKEN} ${SUBSCRIPTION_ID}'
+export RESOURCE_GROUP VNET DOCKERHUB_USER DOCKERHUB_TOKEN SUBSCRIPTION_ID LAB_DOMAIN LAB_DNS_SERVER
+VARS='${RESOURCE_GROUP} ${VNET} ${DOCKERHUB_USER} ${DOCKERHUB_TOKEN} ${SUBSCRIPTION_ID} ${LAB_DOMAIN} ${LAB_DNS_SERVER}'
 
 for tpl in "${TEMPLATES}"/dmz-*.yaml.tpl; do
   base="$(basename "$tpl" .yaml.tpl)"
   out="${OUTDIR}/${base}.yaml"
   envsubst "$VARS" < "$tpl" > "$out"
+  # LAB_DNS_SERVER vacio == lab sin gateway -- ver la misma nota en generate-team.sh.
+  if [[ -z "$LAB_DNS_SERVER" ]]; then
+    sed -i '/DNSCONFIG-BEGIN/,/DNSCONFIG-END/d' "$out"
+  fi
   echo "generado: $out"
 done

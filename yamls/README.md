@@ -30,6 +30,12 @@ llama con esas variables ya resueltas (`RG`, `VNET`, subscription id vía `az ac
 hay que exportar `DOCKERHUB_USER`/`DOCKERHUB_TOKEN` y tener `.env.secrets` listo. Invocarlos a mano
 solo hace falta para depurar la generación sin desplegar.
 
+También resuelven `${LAB_DOMAIN}`/`${LAB_DNS_SERVER}` (ver "DNS interno" abajo) — si
+`LAB_DNS_SERVER` viene vacío (lab sin `vm-wg-gateway` desplegado todavía, o `./lab-azure.sh test`),
+el generador borra el bloque `dnsConfig` del YAML resultante con `sed` entre los centinelas
+`DNSCONFIG-BEGIN`/`DNSCONFIG-END` — `envsubst` no soporta condicionales, así que esa es la forma
+más simple de que el mismo template sirva con y sin gateway.
+
 `generated/` está en `.gitignore` (contiene secretos resueltos) — es la salida intermedia que
 `lab-azure.sh` despliega con `az container create --file`, no se versiona.
 
@@ -55,6 +61,30 @@ un único despliegue compartido, no N copias por equipo.
 CTFd, Provisioner y Monitor (mencionados en la arquitectura de `snet-dmz-shared`) todavía no
 tienen imagen/Dockerfile en ningún repo — no se generó YAML para ellos.
 
+## DNS interno (dnsmasq en `vm-wg-gateway`)
+
+Implementado — ver `docs/plans/internal-dns.md` para el diseño completo. Resumen operativo:
+
+- **`generate-dns-hosts.sh`** — genera bloques de zona (formato `/etc/hosts`) en `generated/dns/`.
+  Tres modos: `team <N> <ips...>` (escritura local, la usa `deploy_team_workload` con las IPs que
+  ya tiene en la mano, sin llamadas a Azure — seguro en paralelo), `dmz` (lee `az container list` +
+  la IP de `vm-wiki`), y `all-from-azure` (reconstruye todo desde una sola `az container list` —
+  es lo que corre `dns-sync --from-azure`).
+- **`sync_lab_dns()`** (en `lab-azure.sh`) — concatena todos los `generated/dns/*.hosts` y los
+  empuja al gateway en **una sola** invocación de `az vm run-command invoke`
+  (`yamls/wg-gateway/remote/apply-dns.sh.tpl`), sin importar cuántos equipos haya. Se llama al
+  final de `deploy_dmz`, `deploy_team`, `create_wiki_vm`, y una vez en `add_team_range` (entre el
+  paso paralelo de contenedores y el paso secuencial de peers WireGuard).
+- **`./lab-azure.sh dns-sync [--from-azure]`** / **`dns-check <fqdn>`** — comandos manuales de
+  sincronización y verificación (compara lo que resuelve el gateway contra la IP real de Azure).
+- Dominio: `sabanacorp.internal` (variable `LAB_DOMAIN` en `lab-azure.sh`), **no** `.local` (mDNS
+  se roba esas consultas en macOS/Linux con avahi).
+
+**Las variables de entorno de los contenedores se quedan en IP a propósito** (`<DATABASE_IP>`,
+`<WEBAPP_IP>` — ver sección siguiente): el DNS es una capa de nombres para humanos y navegación
+dentro del CTF, no el plano de datos de los retos. Un dnsmasq caído no tumba ningún reto ya
+desplegado.
+
 ## Orden de despliegue y resolución de IPs (lo que hace `lab-azure.sh` por ti)
 
 ACI no da DNS entre container groups distintos — un YAML no puede referirse a otro por nombre, así
@@ -76,6 +106,16 @@ Si se necesita hacerlo a mano (depuración):
 az container show -g rg-ctf-semana-ingenieria-test -n <nombre> --query ipAddress.ip -o tsv
 ```
 
+**Por qué esto sigue vigente aun con el DNS interno de arriba ya implementado**: el DNS resuelve
+un nombre a una IP en tiempo de *consulta* (dnsmasq responde con lo que sabe ahora mismo); el
+`sed` de arriba hornea una IP en tiempo de *despliegue* (queda fija dentro del YAML del
+contenedor, no se vuelve a consultar). El registro DNS de `team7-database` solo puede existir
+*después* de que Azure le asigne IP — igual que el `<DATABASE_IP>` de siempre — así que
+`wait_for_ip` sigue siendo el 95% del tiempo y el 100% de la fragilidad de este paso. Lo único que
+cambiaría si las env vars pasaran a FQDN sería mover el acoplamiento de "deploy time" a "runtime"
+(cada reconexión de `webapp` a MySQL pasaría por dnsmasq) — evaluado y **descartado a propósito**
+en `docs/plans/internal-dns.md` ("El huevo y la gallina").
+
 ## Pendiente / gaps conocidos
 
 - **Persistencia — resuelto para `filesrv`**: usa una imagen propia (`maosuarez/sabanacorp-filesrv`)
@@ -94,3 +134,7 @@ az container show -g rg-ctf-semana-ingenieria-test -n <nombre> --query ipAddress
   todavía depende de que las subredes de la VNet puedan enrutarse entre sí (peering/rutas dentro de
   `vnet-ctf-lab` — por defecto Azure ya enruta entre subredes de la misma VNet, pero falta validar
   NSGs si se añaden).
+- **DNS interno**: validado end-to-end 2026-08-10 contra Azure real — Fase 0 (assumption checks) y
+  Fase 1 (dnsmasq en VM viva sin recreación) completadas, zona sincronizada y round-trip verificado.
+  Detalle en `docs/plans/internal-dns.md`. Caveat: contenedores pre-2026-08-10 no tienen `dnsConfig`
+  aplicado (requeriría recreación); nuevos deploys lo reciben automáticamente.

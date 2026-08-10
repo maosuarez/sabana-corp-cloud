@@ -13,6 +13,7 @@ Infraestructura automática para **Sabana Corp**, el Capture The Flag de la Sema
 - Secretos y flags inyectados vía variables de entorno (mismo conjunto para todos los equipos, como requiere CTFd)
 - Resolución automática de IPs entre contenedores dependientes
 - **Gateway WireGuard** (`vm-wg-gateway`, snet-wg-gateway, IP pública, UDP 51820) con aislamiento de acceso por peer vía `iptables` — validado end-to-end 2026-08-08
+- **DNS interno** (dnsmasq en `vm-wg-gateway`, dominio `sabanacorp.internal`): nombres para equipos/DMZ resolubles desde contenedores ACI y desde el PC del participante por el túnel VPN — validado end-to-end 2026-08-10. Ver `docs/plans/internal-dns.md`
 
 **No implementado:**
 - **CTFd, Provisioner, Monitor**: no están en ningún repo, solo documentados en la arquitectura
@@ -84,6 +85,17 @@ cp yamls/.env.secrets.example yamls/.env.secrets
                                      # Útil para equipos que se crearon antes de deploy-wg-gateway
 ```
 
+**DNS interno (dnsmasq en vm-wg-gateway, ver `docs/plans/internal-dns.md`):**
+```bash
+./lab-azure.sh dns-sync              # Empuja el estado local (yamls/generated/dns/*.hosts) al
+                                     # gateway en una sola invocación -- ya se llama sola al
+                                     # final de deploy-dmz/add-team/deploy-wiki-vm
+./lab-azure.sh dns-sync --from-azure # Reconstruye TODA la zona desde 'az container list'
+                                     # (comando de reparación / chequeo pre-evento)
+./lab-azure.sh dns-check <fqdn>      # Resuelve <fqdn> desde el gateway y lo compara con la IP
+                                     # real de Azure
+```
+
 **Estado y pruebas:**
 ```bash
 ./lab-azure.sh status                # Muestra estado de DMZ, DMZ-VM, gateway WireGuard, equipos
@@ -119,6 +131,8 @@ Orquestación completa del ciclo de vida: crear/desplegar/destruir infraestructu
   - `add-team <N>` — crea equipo N (subred + 4 contenedores + peer WireGuard)
   - `add-team-range <inicio> <fin> [paralelismo]` — crea múltiples equipos en paralelo (opcional)
   - `wg-team-peer <N>` — genera solo el peer WireGuard de equipo N (backfill)
+  - `dns-sync [--from-azure]` — sincroniza el DNS interno con el gateway (ver `docs/plans/internal-dns.md`)
+  - `dns-check <fqdn>` — resuelve un nombre desde el gateway y lo compara con Azure
   - `test [N]` — atajo para pruebas: up + deploy-dmz + add-team N
   - `status` — muestra estado de toda la infraestructura
   - `down` — destruye todo
@@ -137,8 +151,9 @@ Plantillas y generadores para contenedores, VMs y clientes VPN.
 - **`.env.secrets`** (gitignored, plantilla en `.env.secrets.example`): FLAGS, contraseñas de BD, JWT_SIGNING_SECRET — compartidos por todos los equipos (por diseño de CTFd)
 - **`generated/`** (gitignored): salida de los generadores, YAML con secretos ya resueltos, cliente WireGuard .conf
 - **`wiki-vm/`**: cloud-init y docker-compose para la VM wiki (validado end-to-end 2026-08-08, ver `docs/plans/wiki-on-vm.md`)
-- **`wg-gateway/`**: cloud-init, scripts remotos, y plantillas para el gateway WireGuard VM (validado end-to-end 2026-08-08, ver `docs/plans/wireguard-vpn-gateway.md`)
-- **`generate-wg-client.sh`**: genera archivos `.conf` para clientes WireGuard (peers de equipos + admin)
+- **`wg-gateway/`**: cloud-init, scripts remotos, y plantillas para el gateway WireGuard VM (validado end-to-end 2026-08-08, ver `docs/plans/wireguard-vpn-gateway.md`). Incluye `remote/apply-dns.sh.tpl` (instala zonas DNS en dnsmasq — ver `docs/plans/internal-dns.md`)
+- **`generate-wg-client.sh`**: genera `.conf` + `-README.md` para clientes WireGuard (peers de equipos + admin)
+- **`generate-dns-hosts.sh`**: genera bloques de zona DNS (`generated/dns/*.hosts`) desde IPs conocidas o desde `az container list` — ver `docs/plans/internal-dns.md`
 
 Ver `yamls/README.md` para detalles de orden de despliegue, resolución de IPs dependientes, y generación de archivos.
 
@@ -148,7 +163,7 @@ Documentación de decisiones de diseño e implementación:
 - **`wireguard-vpn-gateway.md`**: diseño e implementación del gateway WireGuard (validado end-to-end 2026-08-08), incluyendo aislamiento de acceso por peer vía `iptables`
 - **`network-segmentation-nsgs.md`**: matriz de reglas NSG propuesta para aislar equipos entre sí y de la DMZ (diseño completado, no implementado), incluyendo notas de rollout
 - **`observability-monitoring.md`**: Prometheus + Grafana para el staff (diseño completado, no implementado)
-- **`internal-dns.md`**: DNS interno del lab con dnsmasq en `vm-wg-gateway`, FQDN para equipos/DMZ resolubles también desde el PC del participante por el túnel (diseño completado, no implementado — pensado para después de que la DMZ esté completa)
+- **`internal-dns.md`**: DNS interno del lab con dnsmasq en `vm-wg-gateway`, FQDN para equipos/DMZ resolubles también desde el PC del participante por el túnel — implementado; pendiente validar Fase 0 (supuestos de `dnsConfig` en ACI) y pruebas de escala/resiliencia contra Azure real
 
 ## Costos
 

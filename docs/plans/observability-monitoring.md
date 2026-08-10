@@ -208,6 +208,7 @@ no una alerta.
 | `DMZDegradada` | cualquier servicio de DMZ caído | crítica | afecta a **todos** los equipos, prioridad máxima |
 | `DecoyCaido` | un decoy caído >5 min | baja | cosmético, no bloquea ningún reto |
 | `GatewaySinHandshakes` | 0 handshakes en 5 min con peers configurados | crítica | nadie puede entrar al lab |
+| `DnsCaido` | sonda TCP/UDP 53 contra `10.10.0.4` falla | media | nadie resuelve nombres, pero ningún reto se cae (env vars siguen en IP — ver `docs/plans/internal-dns.md` "Resiliencia") |
 
 ### La alerta que no existe en ningún stack estándar: `DerivaDeIP`
 
@@ -226,6 +227,14 @@ Por eso el script de targets compara, para cada dependiente, la IP que tiene iny
 `yamls/generated/`) contra la IP actual de su dependencia, y exporta
 `sabana_ip_drift{team,service} = 0|1`. Es la alerta más específica de esta arquitectura y la
 única que no sale gratis de Prometheus.
+
+El DNS interno (`docs/plans/internal-dns.md`, implementado) **no reemplaza esta alerta** —
+decisión deliberada de ese plan: las env vars de los retos se quedan en IP a propósito, así que
+`webapp` puede seguir con la IP vieja de `database` aunque el DNS ya sepa la nueva. `DerivaDeIP`
+ahora tiene una hermana barata de calcular con el mismo mecanismo: comparar el registro DNS
+(`dns-check <fqdn>`) contra la IP real de Azure — detecta cuándo la *zona local* quedó desincronizada,
+no cuándo un contenedor quedó con la IP vieja horneada (son dos fallos distintos, con la misma
+forma).
 
 ## Observar no es restaurar: subcomandos `restore`
 

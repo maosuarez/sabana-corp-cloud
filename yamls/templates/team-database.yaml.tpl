@@ -20,6 +20,18 @@ properties:
         resources: {requests: {cpu: 0.5, memoryInGB: 0.5}}
         ports: [{port: 3306}]
 
+  # DNSCONFIG-BEGIN -- lo elimina el generador si LAB_DNS_SERVER esta vacio (lab sin gateway).
+  # 2o nameserver a proposito: si dnsmasq no responde, el contenedor sigue resolviendo internet
+  # via Azure DNS. Los nombres del lab dejan de resolver, pero ningun reto se cae porque
+  # DB_HOST/WEBAPP_BASE_URL siguen siendo IPs (ver docs/plans/internal-dns.md).
+  dnsConfig:
+    nameServers:
+      - "${LAB_DNS_SERVER}"
+      - "168.63.129.16"
+    searchDomains: "team${TEAM}.${LAB_DOMAIN} dmz.${LAB_DOMAIN} ${LAB_DOMAIN}"
+    options: "ndots:2 timeout:1 attempts:2"
+  # DNSCONFIG-END
+
   osType: Linux
   restartPolicy: OnFailure
 

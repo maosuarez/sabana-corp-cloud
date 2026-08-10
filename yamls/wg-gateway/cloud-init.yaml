@@ -5,12 +5,17 @@
 # lab-azure.sh a traves de 'az vm run-command invoke'. El nombre de interfaz 'eth0' que asume el
 # MASQUERADE de mas abajo quedo confirmado contra la imagen Ubuntu real de esta VM en esa misma
 # validacion (el trafico de los clientes VPN sale correctamente).
+#
+# dnsmasq (ver docs/plans/internal-dns.md): DNS interno del lab, mismo host que la VPN porque es
+# la unica maquina que ya esta en el camino de todos (clientes VPN + contenedores ACI de la VNet).
 package_update: true
 packages:
   - wireguard
   - wireguard-tools
   - iptables-persistent
   - qrencode
+  - dnsmasq
+  - dnsutils
 
 write_files:
   - path: /etc/sysctl.d/99-wg-forward.conf
@@ -32,6 +37,50 @@ write_files:
       PostUp   = iptables -t nat -A POSTROUTING -o eth0 -j MASQUERADE; iptables -A FORWARD -m state --state RELATED,ESTABLISHED -j ACCEPT; iptables -P FORWARD DROP
       PostDown = iptables -t nat -D POSTROUTING -o eth0 -j MASQUERADE
 
+  # DNS interno del lab -- ver docs/plans/internal-dns.md "Cambios archivo por archivo".
+  - path: /etc/dnsmasq.d/00-lab.conf
+    content: |
+      # Escucha solo en las interfaces del lab. bind-dynamic (no bind-interfaces): tolera que wg0
+      # aparezca/desaparezca y evita chocar con el stub de systemd-resolved en 127.0.0.53:53.
+      bind-dynamic
+      interface=wg0
+      interface=eth0
+
+      # Upstream explicito. no-resolv es OBLIGATORIO: sin el, dnsmasq leeria /etc/resolv.conf, que
+      # en Ubuntu 22.04 apunta a 127.0.0.53 (systemd-resolved) -> bucle de resolucion consigo mismo.
+      no-resolv
+      server=168.63.129.16
+
+      # La zona del lab nunca se reenvia hacia arriba: Azure DNS no la conoce, y sin esto cada
+      # nombre inexistente del lab se va a internet y tarda.
+      local=/sabanacorp.internal/
+      domain=sabanacorp.internal
+      expand-hosts
+      domain-needed
+      bogus-priv
+
+      # Registros del lab: formato /etc/hosts, un archivo por bloque, recargados por inotify (sin
+      # SIGHUP y sin reiniciar el servicio -- SIGHUP no relee /etc/dnsmasq.d/*.conf, hostsdir si).
+      hostsdir=/etc/dnsmasq.hosts.d
+
+      # TTL corto: si un contenedor se recrea con otra IP, la correccion propaga en segundos.
+      local-ttl=10
+      cache-size=1000
+      log-facility=/var/log/dnsmasq.log
+      #log-queries   # activar solo para depurar; en el evento genera mucho ruido
+
+  # El directorio tiene que existir antes de que dnsmasq arranque -- si hostsdir apunta a algo
+  # inexistente, dnsmasq falla al iniciar.
+  - path: /etc/dnsmasq.hosts.d/.keep
+    content: ""
+
+  # El dnsmasq.service de Ubuntu no trae Restart=always por defecto.
+  - path: /etc/systemd/system/dnsmasq.service.d/10-restart.conf
+    content: |
+      [Service]
+      Restart=always
+      RestartSec=2
+
 runcmd:
   # El keypair del servidor se genera aqui, no solo en init-server-keys.sh: wg-quick exige
   # PrivateKey definido en [Interface] para poder levantar la interfaz, asi que sin esto
@@ -42,4 +91,13 @@ runcmd:
   - sed -i "/^\[Interface\]/a PrivateKey = $(cat /etc/wireguard/server_private.key)" /etc/wireguard/wg0.conf
   - sysctl --system
   - systemctl enable --now wg-quick@wg0
+  # Reglas INPUT para 53: documentan la intencion, son no-ops mientras la politica de INPUT siga
+  # en ACCEPT (ver docs/plans/internal-dns.md "Resiliencia" -- nota de seguridad). Van antes del
+  # netfilter-persistent save que ya existia.
+  - iptables -A INPUT -i wg0 -p udp --dport 53 -j ACCEPT
+  - iptables -A INPUT -i wg0 -p tcp --dport 53 -j ACCEPT
+  - iptables -A INPUT -i eth0 -s 10.0.0.0/8 -p udp --dport 53 -j ACCEPT
+  - iptables -A INPUT -i eth0 -s 10.0.0.0/8 -p tcp --dport 53 -j ACCEPT
   - netfilter-persistent save
+  - systemctl daemon-reload
+  - systemctl enable --now dnsmasq

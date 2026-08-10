@@ -2,10 +2,24 @@
 
 ## Estado
 
-**Diseño, no implementado.** Ninguna pieza de este documento existe todavía en el repo: hoy
-`yamls/templates/*.yaml.tpl` no llevan `dnsConfig`, `yamls/wg-gateway/cloud-init.yaml` no
-instala dnsmasq, y `lab-azure.sh:create_wg_peer()` (línea ~514) sigue rellenando
-`CLIENT_DNS="1.1.1.1"` en el `.conf` de cada peer.
+**Validado contra Azure real (2026-08-10).** Fase 0 (4 assumption checks) y Fase 1 (instalación de
+dnsmasq sobre la VM existente) completadas sin recrear `vm-wg-gateway` — se preservaron los
+`.conf` ya entregados a `team1`/`team2`. `dns-sync --from-azure` y `dns-check` validados
+end-to-end sobre gateway vivo: zona reconstruida desde `az container list` (22 registros: 8 de dos
+equipos, 14 de DMZ e infra) y DNS round-trip verificado. **Bug encontrado y reparado**:
+`yamls/generate-dns-hosts.sh`, función `dmz_hosts_line()`, tenía formato printf con 3 placeholders
+`%s.dmz.%s` pero solo 2 argumentos distintos — duplicaba nombre canónico en vez de emparejar canon
+con alias. Reparado y resyncronizado al gateway vivo (los registros de DMZ ahora muestran
+canon/alias pareados correctamente, ej. `printer-01.dmz.sabanacorp.internal printer.dmz...`).
+
+**Caveat**: los contenedores ya desplegados antes de esta sesión (team1, team2, 13 DMZ) NO tienen
+`dnsConfig` aplicado todavía — solo los desplegados de ahora en adelante (via `add-team <N>` o
+`deploy-dmz` redeploy) lo reciben, porque cambiar `dnsConfig` en un container group existente
+requiere recreación (nueva IP, redeployment de dependientes). Se dejó deliberadamente sin tocar
+(decisión operativa: no recrear sin consentimiento explícito) — el sistema DNS funciona
+completamente para estos contenedores como **targets de resolución** (sus IPs se registran y
+resuelven, validado arriba); simplemente no pueden resolver nombres desde adentro de su propio
+`resolv.conf` hasta redesplegarse.
 
 **Momento de ejecución: después de que la DMZ completa esté montada.** Es un requisito
 explícito, no una preferencia de orden. Motivos concretos:

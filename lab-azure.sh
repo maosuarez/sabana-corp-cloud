@@ -41,6 +41,13 @@
 #                                 # docs/plans/wiki-on-vm.md (cuota de VM desbloqueada ese mismo
 #                                 # dia tras upgrade a Pay-As-You-Go, 10 vCPUs
 #                                 # StandardDsv7Family en eastus2)
+#   ./lab-azure.sh dns-sync            # empuja el estado LOCAL (yamls/generated/dns/*.hosts) al
+#                                # dnsmasq de vm-wg-gateway en una sola invocacion (O(1)) -- ver
+#                                # docs/plans/internal-dns.md
+#   ./lab-azure.sh dns-sync --from-azure # reconstruye TODA la zona desde 'az container list' y
+#                                # la empuja -- comando de reparacion / chequeo pre-evento
+#   ./lab-azure.sh dns-check <fqdn>  # resuelve <fqdn> desde el gateway y lo compara con la IP
+#                                # real de Azure
 #   ./lab-azure.sh test [N]      # atajo: up + deploy-dmz + add-team N (N=1 si se omite) -- todo
 #                                # el laboratorio de una vez para pruebas rapidas (sin gateway VPN
 #                                # a proposito, ver nota en deploy_wg_gateway())
@@ -61,6 +68,16 @@ WORKDIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
 YAMLS_DIR="${WORKDIR}/yamls"
 WG_CLIENTS_DIR="${YAMLS_DIR}/generated/wg-clients"
 SUBSCRIPTION_ID=""
+
+# DNS interno del lab (ver docs/plans/internal-dns.md). LAB_DOMAIN vive en esta unica variable a
+# proposito -- cambiarlo es una edicion aqui + un dns-sync. WG_GW_PRIVATE_IP/WG_GW_TUNNEL_IP son
+# constantes de diseño (la primera se fija con --private-ip-address en deploy_wg_gateway, la
+# segunda la fija yamls/wg-gateway/cloud-init.yaml) -- no hay que descubrirlas en tiempo de
+# generacion.
+LAB_DOMAIN="${LAB_DOMAIN:-sabanacorp.internal}"
+WG_GW_PRIVATE_IP="10.10.0.4"
+WG_GW_TUNNEL_IP="10.200.0.1"
+DNS_DIR="${YAMLS_DIR}/generated/dns"
 
 # ---------------------------------------------------------------------------
 # Funciones auxiliares
@@ -198,6 +215,7 @@ deploy_dmz() {
   require_dockerhub_env
   echo "== Generando YAML de la DMZ (yamls/generate-dmz.sh) =="
   RESOURCE_GROUP="$RG" VNET="$VNET" SUBSCRIPTION_ID="$(get_subscription_id)" \
+    LAB_DOMAIN="$LAB_DOMAIN" LAB_DNS_SERVER="$(lab_dns_server)" \
     "${YAMLS_DIR}/generate-dmz.sh"
 
   local gen="${YAMLS_DIR}/generated"
@@ -214,6 +232,11 @@ deploy_dmz() {
     echo "== Desplegando ${svc} =="
     deploy_container "${gen}/${svc}.yaml" >/dev/null
   done
+
+  echo "== Registrando DNS de la DMZ (dmz.hosts + infra.hosts) =="
+  RESOURCE_GROUP="$RG" LAB_DOMAIN="$LAB_DOMAIN" WG_GW_TUNNEL_IP="$WG_GW_TUNNEL_IP" \
+    "${YAMLS_DIR}/generate-dns-hosts.sh" dmz
+  sync_lab_dns
 
   echo ""
   echo "== DMZ desplegada: 13 contenedores, cada uno con su propia IP en snet-dmz-shared =="
@@ -260,6 +283,7 @@ deploy_team_workload() {
 
   echo "== Generando YAML de team${team} (yamls/generate-team.sh) =="
   RESOURCE_GROUP="$RG" VNET="$VNET" SUBSCRIPTION_ID="$(get_subscription_id)" \
+    LAB_DOMAIN="$LAB_DOMAIN" LAB_DNS_SERVER="$(lab_dns_server)" \
     "${YAMLS_DIR}/generate-team.sh" "$team"
 
   local gen="${YAMLS_DIR}/generated"
@@ -277,10 +301,19 @@ deploy_team_workload() {
   sed -i "s|<WEBAPP_IP>|${webapp_ip}|" "${gen}/team${team}-xss-bot.yaml"
 
   echo "== Desplegando team${team}-xss-bot =="
-  deploy_container "${gen}/team${team}-xss-bot.yaml" >/dev/null
+  local bot_ip
+  bot_ip="$(deploy_container "${gen}/team${team}-xss-bot.yaml")"
 
   echo "== Desplegando team${team}-linux-server =="
-  deploy_container "${gen}/team${team}-linux-server.yaml" >/dev/null
+  local linux_ip
+  linux_ip="$(deploy_container "${gen}/team${team}-linux-server.yaml")"
+
+  # DNS: solo escritura LOCAL aqui (yamls/generated/dns/team<N>.hosts) -- nada de run-command.
+  # Es lo que mantiene esta funcion segura de correr en paralelo entre equipos en
+  # add_team_range(); el push al gateway (O(1), no por equipo) va en un paso secuencial aparte
+  # (ver sync_lab_dns y "Mecanismo de escritura de la zona" en docs/plans/internal-dns.md).
+  RESOURCE_GROUP="$RG" LAB_DOMAIN="$LAB_DOMAIN" WG_GW_TUNNEL_IP="$WG_GW_TUNNEL_IP" \
+    "${YAMLS_DIR}/generate-dns-hosts.sh" team "$team" "$db_ip" "$webapp_ip" "$linux_ip" "$bot_ip"
 
   echo "== team${team} desplegado: 4 contenedores, cada uno con su propia IP en snet-team${team} =="
 }
@@ -292,6 +325,7 @@ deploy_team() {
 
   add_team_subnet "$team"
   deploy_team_workload "$team"
+  sync_lab_dns
 
   echo ""
   create_wg_team_peer "$team"
@@ -324,12 +358,15 @@ add_team_range() {
     return
   fi
 
-  # Modo paralelo: subnets y peers WireGuard se quedan secuenciales a propósito.
+  # Modo paralelo: subnets, DNS y peers WireGuard se quedan secuenciales a propósito.
   #   - Subnets: 'az network vnet subnet create' concurrentes sobre la MISMA VNet suelen chocar
   #     con 409 AnotherOperationInProgress en Azure -- crear todas antes de paralelizar evita esa
   #     carrera.
-  #   - Peers WireGuard: create_wg_peer corre scripts remotos en vm-wg-gateway que leen/escriben
-  #     la config de wg0 -- correrlos en paralelo arriesga corromper esa config compartida.
+  #   - DNS (sync_lab_dns) y peers WireGuard: ambos corren 'az vm run-command invoke' contra
+  #     vm-wg-gateway, que es de UN SOLO HILO por VM -- invocaciones concurrentes contra la misma
+  #     VM se serializan o fallan con conflicto de operacion en curso. Regla general, no solo de
+  #     los peers: TODA escritura sobre vm-wg-gateway va en un paso secuencial (ver
+  #     docs/plans/internal-dns.md "Mecanismo de escritura de la zona y paralelismo").
   # Lo que sí se paraleliza (que es lo lento: generar YAML + esperar 4 IPs por equipo) es
   # deploy_team_workload, con tope de concurrencia via job control de bash.
   require_team_prereqs
@@ -366,6 +403,14 @@ add_team_range() {
   fi
   rm -f "$failed_file"
 
+  # Paso 2.5: UN solo push de DNS para todo el rango, no uno por equipo -- O(1), no O(N). Cada
+  # deploy_team_workload de arriba ya escribio su team<N>.hosts local (sin tocar el gateway);
+  # aqui se concatenan todos y se empujan en una sola invocacion de run-command. Va antes de los
+  # peers (paso 3) porque ambos tocan vm-wg-gateway y esa VM solo procesa un run-command a la vez.
+  echo ""
+  echo "== Paso 2.5: sincronizando DNS (1 invocacion para ${start}..${end}) =="
+  sync_lab_dns
+
   echo ""
   echo "== Paso 3: peers WireGuard (secuencial, evita chocar sobre vm-wg-gateway) =="
   for (( team = start; team <= end; team++ )); do
@@ -392,7 +437,7 @@ create_wiki_vm() {
 
   echo "== VM del wiki (validado 2026-08-08), ver docs/plans/wiki-on-vm.md =="
   echo "== Generando docker-compose (yamls/generate-wiki-vm.sh) =="
-  "${YAMLS_DIR}/generate-wiki-vm.sh"
+  LAB_DOMAIN="$LAB_DOMAIN" "${YAMLS_DIR}/generate-wiki-vm.sh"
 
   echo "== az vm create: vm-wiki (${vm_size}, snet-dmz-vm, sin IP publica) =="
   az vm create \
@@ -435,6 +480,12 @@ create_wiki_vm() {
 
   local vm_ip
   vm_ip="$(az vm list-ip-addresses -g "$RG" -n vm-wiki --query "[0].virtualMachine.network.privateIpAddresses[0]" --output tsv)"
+
+  echo "== Registrando wiki.dmz en el DNS del lab =="
+  RESOURCE_GROUP="$RG" LAB_DOMAIN="$LAB_DOMAIN" WG_GW_TUNNEL_IP="$WG_GW_TUNNEL_IP" \
+    "${YAMLS_DIR}/generate-dns-hosts.sh" dmz
+  sync_lab_dns
+
   echo ""
   echo "== VM del wiki desplegada (IP privada: ${vm_ip}) — Validada 2026-08-08, ver docs/plans/wiki-on-vm.md =="
   echo "  az vm run-command invoke -g ${RG} -n vm-wiki --command-id RunShellScript --scripts 'docker compose -f /opt/wiki/docker-compose.yml ps'"
@@ -507,14 +558,21 @@ create_wg_peer() {
   gw_ip="$(az vm list-ip-addresses --resource-group "$RG" --name vm-wg-gateway \
     --query "[0].virtualMachine.network.publicIpAddresses[0].ipAddress" --output tsv)"
 
+  # AllowedIPs del cliente != CIDRs de las reglas FORWARD de arriba: el cliente necesita ademas
+  # poder ENVIAR paquetes a WG_GW_TUNNEL_IP (si no, el driver de WireGuard los descarta en el
+  # propio cliente, antes de que lleguen al gateway -- ver docs/plans/internal-dns.md
+  # "Arquitectura de resolución"). El trafico al propio gateway es INPUT, no FORWARD, así que no
+  # necesita una regla iptables nueva -- por eso add-peer.sh.tpl (arriba) sigue recibiendo solo
+  # allowed_cidrs, sin el /32 del DNS.
   mkdir -p "$WG_CLIENTS_DIR"
   PEER_NAME="$name" \
     CLIENT_PRIVKEY="$privkey" \
     CLIENT_TUNNEL_IP="$tunnel_ip" \
-    CLIENT_DNS="1.1.1.1" \
+    CLIENT_DNS="${WG_GW_TUNNEL_IP}, ${LAB_DOMAIN}" \
     SERVER_PUBKEY="$server_pubkey" \
     GATEWAY_PUBLIC_IP="$gw_ip" \
-    CLIENT_ALLOWED_IPS="${allowed_cidrs// /, }" \
+    CLIENT_ALLOWED_IPS="${allowed_cidrs// /, }, ${WG_GW_TUNNEL_IP}/32" \
+    LAB_DOMAIN="$LAB_DOMAIN" \
     "${YAMLS_DIR}/generate-wg-client.sh"
 }
 
@@ -537,7 +595,7 @@ deploy_wg_gateway() {
   echo "== VM del gateway WireGuard (validado 2026-08-08), ver docs/plans/wireguard-vpn-gateway.md =="
   create_wg_nsg
 
-  echo "== az vm create: vm-wg-gateway (${vm_size}, snet-wg-gateway, CON IP publica) =="
+  echo "== az vm create: vm-wg-gateway (${vm_size}, snet-wg-gateway, CON IP publica, IP privada estatica ${WG_GW_PRIVATE_IP}) =="
   az vm create \
     --resource-group "$RG" \
     --name vm-wg-gateway \
@@ -545,6 +603,7 @@ deploy_wg_gateway() {
     --size "$vm_size" \
     --vnet-name "$VNET" \
     --subnet snet-wg-gateway \
+    --private-ip-address "$WG_GW_PRIVATE_IP" \
     --admin-username azureuser \
     --generate-ssh-keys \
     --public-ip-address vm-wg-gateway-pip \
@@ -568,6 +627,21 @@ deploy_wg_gateway() {
     sleep 15
   done
 
+  echo "== Esperando a que dnsmasq quede activo (cloud-init, ver docs/plans/internal-dns.md) =="
+  tries=0
+  until az vm run-command invoke --resource-group "$RG" --name vm-wg-gateway \
+          --command-id RunShellScript --scripts "systemctl is-active dnsmasq" \
+          --query "value[0].message" --output tsv 2>/dev/null | grep -q "^active$"; do
+    tries=$((tries + 1))
+    if (( tries >= max_tries )); then
+      echo "[ERROR] dnsmasq no quedó activo tras $((max_tries * 15 / 60)) min. Revisa manualmente:" >&2
+      echo "  az vm run-command invoke -g ${RG} -n vm-wg-gateway --command-id RunShellScript --scripts 'systemctl status dnsmasq; journalctl -u dnsmasq --no-pager -n 50'" >&2
+      exit 1
+    fi
+    echo "  ... dnsmasq aún no activo (intento ${tries}/${max_tries}), esperando 15s"
+    sleep 15
+  done
+
   local gw_ip
   gw_ip="$(az vm list-ip-addresses --resource-group "$RG" --name vm-wg-gateway \
     --query "[0].virtualMachine.network.publicIpAddresses[0].ipAddress" --output tsv)"
@@ -576,9 +650,138 @@ deploy_wg_gateway() {
   echo "== Creando peer admin =="
   create_wg_peer "admin" "10.200.0.2/32" "10.0.0.0/8"
 
+  # Un gateway recreado (VM perdida/reboot con re-imagen) recupera la zona sin pasos manuales --
+  # la fuente de verdad local (yamls/generated/dns/*.hosts) ya existe si veniamos de un lab con
+  # equipos desplegados.
+  sync_lab_dns
+
   echo ""
   echo "== Gateway WireGuard desplegado. Cliente admin: ${WG_CLIENTS_DIR}/admin.conf =="
+  echo "== DNS interno: ${WG_GW_PRIVATE_IP} (VNet) / ${WG_GW_TUNNEL_IP} (tunel) -- ver docs/plans/internal-dns.md =="
   echo "== Validado end-to-end 2026-08-08 (ver docs/plans/wireguard-vpn-gateway.md) =="
+}
+
+# ---------------------------------------------------------------------------
+# Funciones — DNS interno del lab (dnsmasq en vm-wg-gateway)
+# ---------------------------------------------------------------------------
+#
+# Ver docs/plans/internal-dns.md. Regla general: TODA escritura sobre vm-wg-gateway va en un paso
+# secuencial -- 'az vm run-command invoke' es de un solo hilo por VM (misma causa raiz que ya
+# obligo a dejar los peers WireGuard secuenciales en add_team_range()). sync_lab_dns() por eso
+# manda UN solo push por operacion (concatena todos los *.hosts locales), nunca uno por equipo.
+
+# lab_dns_server() -- devuelve WG_GW_PRIVATE_IP si vm-wg-gateway existe, cadena vacia si no. Es lo
+# que decide si las plantillas de contenedor llevan dnsConfig (ver generate-team.sh/generate-dmz.sh).
+lab_dns_server() {
+  if az vm show --resource-group "$RG" --name vm-wg-gateway --output none 2>/dev/null; then
+    echo "$WG_GW_PRIVATE_IP"
+  else
+    echo ""
+  fi
+}
+
+# sync_lab_dns -- concatena yamls/generated/dns/*.hosts en una sola zona y la empuja al gateway en
+# UNA invocacion de run-command (O(1), no O(N) equipos -- ver "Escalabilidad" en el plan).
+# Guardada y no bloqueante, mismo espiritu que create_wg_team_peer: si el gateway no existe, avisa
+# y sigue -- un lab sin gateway tiene que poder seguir desplegandose igual.
+sync_lab_dns() {
+  if ! az vm show --resource-group "$RG" --name vm-wg-gateway --output none 2>/dev/null; then
+    echo "[WARN] vm-wg-gateway no existe -- se omite sync_lab_dns (sin gateway no hay DNS que sincronizar)."
+    return 0
+  fi
+
+  mkdir -p "$DNS_DIR"
+  local lockfile="${DNS_DIR}/.lock" zonefile="${DNS_DIR}/lab.hosts"
+  (
+    flock -x 200
+    : > "$zonefile"
+    local f
+    for f in "${DNS_DIR}"/*.hosts; do
+      [[ -e "$f" && "$(basename "$f")" != "lab.hosts" ]] || continue
+      cat "$f" >> "$zonefile"
+    done
+  ) 200>"$lockfile"
+
+  if [[ ! -s "$zonefile" ]]; then
+    echo "[WARN] no hay registros DNS locales que sincronizar todavia (yamls/generated/dns/*.hosts vacio)."
+    return 0
+  fi
+
+  echo "== sync_lab_dns: empujando $(grep -vcE '^\s*(#.*)?$' "$zonefile" || true) registros a vm-wg-gateway (1 invocacion) =="
+  local rendered out
+  rendered="$(ZONE_NAME="lab" ZONE_B64="$(base64 -w0 "$zonefile")" \
+    envsubst '${ZONE_NAME} ${ZONE_B64}' < "${YAMLS_DIR}/wg-gateway/remote/apply-dns.sh.tpl")"
+
+  out="$(az vm run-command invoke --resource-group "$RG" --name vm-wg-gateway \
+    --command-id RunShellScript --scripts "$rendered" \
+    --query "value[0].message" --output tsv)"
+  sed -n '/\[stdout\]/,/\[stderr\]/{//!p}' <<<"$out"
+
+  if ! grep -q '^OK registros=' <<<"$out"; then
+    echo "[ERROR] sync_lab_dns: el gateway no confirmo la instalacion. Salida cruda:" >&2
+    echo "$out" >&2
+    exit 1
+  fi
+}
+
+# rebuild_lab_dns_from_azure -- reconstruye TODOS los *.hosts desde el estado real de Azure (una
+# sola az container list) y los empuja. Comando de reparacion (dns-sync --from-azure) y el que se
+# corre antes del evento para garantizar que la zona refleja Azure, no la memoria del operador.
+rebuild_lab_dns_from_azure() {
+  echo "== Reconstruyendo la zona DNS completa desde Azure (dns-sync --from-azure) =="
+  RESOURCE_GROUP="$RG" LAB_DOMAIN="$LAB_DOMAIN" WG_GW_TUNNEL_IP="$WG_GW_TUNNEL_IP" \
+    "${YAMLS_DIR}/generate-dns-hosts.sh" all-from-azure
+  sync_lab_dns
+}
+
+# dns_check <fqdn> -- resuelve <fqdn> preguntando al gateway y lo compara con la IP real que tiene
+# Azure para el container group/VM correspondiente (deriva el nombre del container group del FQDN
+# via la regla de derivacion inversa). Es el chequeo que se corre antes de abrir el evento.
+dns_check() {
+  local fqdn="${1:?Uso: $0 dns-check <fqdn.sabanacorp.internal>}"
+
+  if ! az vm show --resource-group "$RG" --name vm-wg-gateway --output none 2>/dev/null; then
+    echo "[ERROR] vm-wg-gateway no existe -- no hay DNS que consultar."
+    exit 1
+  fi
+
+  local resolved
+  resolved="$(az vm run-command invoke --resource-group "$RG" --name vm-wg-gateway \
+    --command-id RunShellScript --scripts "dig +short @127.0.0.1 ${fqdn}" \
+    --query "value[0].message" --output tsv 2>/dev/null \
+    | sed -n '/\[stdout\]/,/\[stderr\]/{//!p}' | tr -d '\r' | head -n1)"
+
+  if [[ -z "$resolved" ]]; then
+    echo "[FALLO] ${fqdn} no resuelve desde el gateway."
+    exit 1
+  fi
+
+  echo "${fqdn} -> ${resolved} (segun el gateway)"
+
+  # Comparacion best-effort contra Azure: solo para nombres team<N>.<svc> o dmz.<svc>, que son los
+  # que este script sabe derivar. Otros FQDN (alias narrativos, infra) solo se resuelven, sin
+  # comparar.
+  local svc team real_ip cg_name=""
+  if [[ "$fqdn" =~ ^([a-z0-9-]+)\.team([0-9]+)\.${LAB_DOMAIN//./\\.}$ ]]; then
+    svc="${BASH_REMATCH[1]}"; team="${BASH_REMATCH[2]}"
+    cg_name="team${team}-${svc}"
+  elif [[ "$fqdn" =~ ^([a-z0-9-]+)\.dmz\.${LAB_DOMAIN//./\\.}$ ]]; then
+    svc="${BASH_REMATCH[1]}"
+    cg_name="dmz-${svc}"
+  fi
+
+  if [[ -n "$cg_name" ]]; then
+    real_ip="$(az container show --resource-group "$RG" --name "$cg_name" \
+      --query ipAddress.ip --output tsv 2>/dev/null || true)"
+    if [[ -n "$real_ip" ]]; then
+      if [[ "$real_ip" == "$resolved" ]]; then
+        echo "OK: coincide con la IP real de Azure (${cg_name})."
+      else
+        echo "[DESAJUSTE] Azure tiene ${cg_name}=${real_ip}, pero el DNS resuelve ${resolved}. Corre: $0 dns-sync --from-azure"
+        exit 1
+      fi
+    fi
+  fi
 }
 
 # az container list nunca trae instanceView poblado (limitación de la API/CLI, no filtro
@@ -640,9 +843,12 @@ status() {
       --query "[0].virtualMachine.network.publicIpAddresses[0].ipAddress" --output tsv)"
     printf "  %-22s %-18s %s\n" "vm-wg-gateway" "$wg_power" "$wg_pub_ip"
     if [[ "$wg_power" == "VM running" ]]; then
-      echo "  wg show wg0 (peers / tunnel IPs / ultimo handshake):"
+      echo "  wg show wg0 (peers / tunnel IPs / ultimo handshake) + estado DNS interno:"
+      # Una sola invocacion de run-command para las dos cosas (ver docs/plans/internal-dns.md
+      # "Mecanismo de escritura de la zona": run-command es de un solo hilo por VM, no vale la
+      # pena gastar dos round-trips en un status que se corre a menudo).
       az vm run-command invoke --resource-group "$RG" --name vm-wg-gateway --command-id RunShellScript \
-        --scripts "wg show wg0" \
+        --scripts "wg show wg0; echo '--- dns ---'; systemctl is-active dnsmasq; wc -l /etc/dnsmasq.hosts.d/* 2>/dev/null" \
         --query "value[0].message" --output tsv 2>/dev/null \
         | sed -n '/\[stdout\]/,/\[stderr\]/{//!p}' | sed 's/^/    /'
     fi
@@ -702,11 +908,26 @@ case "${1:-}" in
     esac
     create_wg_team_peer "$team"
     ;;
+  dns-sync)
+    # Sin --from-azure: push O(1) del estado local (yamls/generated/dns/*.hosts) -- rapido, para
+    # correr despues de una operacion manual. Con --from-azure: reconstruye todo desde Azure
+    # primero (comando de reparacion / chequeo pre-evento). Ver docs/plans/internal-dns.md.
+    shift
+    if [[ "${1:-}" == "--from-azure" ]]; then
+      rebuild_lab_dns_from_azure
+    else
+      sync_lab_dns
+    fi
+    ;;
+  dns-check)
+    shift
+    dns_check "${1:-}"
+    ;;
   test)              shift; test_deploy "${1:-1}" ;;
   status)            status ;;
   down)              down ;;
   *)
-    echo "Uso: $0 {up|deploy-dmz|add-team <N>|add-team-range <inicio> <fin> [paralelismo]|deploy-wiki-vm|deploy-wg-gateway|wg-team-peer <N>|test [N]|status|down}"
+    echo "Uso: $0 {up|deploy-dmz|add-team <N>|add-team-range <inicio> <fin> [paralelismo]|deploy-wiki-vm|deploy-wg-gateway|wg-team-peer <N>|dns-sync [--from-azure]|dns-check <fqdn>|test [N]|status|down}"
     exit 1
     ;;
 esac

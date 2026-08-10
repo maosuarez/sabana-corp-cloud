@@ -18,6 +18,8 @@
 #
 # <DATABASE_IP> y <WEBAPP_IP> quedan sin resolver a proposito: dependen de la IP que Azure asigne
 # al desplegar database/webapp, y eso no se sabe hasta despues del deploy. Ver yamls/README.md.
+# Esto NO cambia con el DNS interno (ver docs/plans/internal-dns.md): las env vars de los retos
+# se quedan en IP a proposito, el DNS es solo para nombres humanos/navegacion.
 #
 # Requiere que exista la subred snet-team<N> (10.60.<N>.0/24) delegada a
 # Microsoft.ContainerInstance/containerGroups -- este script no la crea.
@@ -32,6 +34,8 @@ esac
 
 RESOURCE_GROUP="${RESOURCE_GROUP:-rg-ctf-semana-ingenieria-test}"
 VNET="${VNET:-vnet-ctf-lab}"
+LAB_DOMAIN="${LAB_DOMAIN:-sabanacorp.internal}"
+LAB_DNS_SERVER="${LAB_DNS_SERVER:-}"
 : "${DOCKERHUB_USER:?Falta exportar DOCKERHUB_USER}"
 : "${DOCKERHUB_TOKEN:?Falta exportar DOCKERHUB_TOKEN}"
 SUBSCRIPTION_ID="${SUBSCRIPTION_ID:-$(az account show --query id --output tsv)}"
@@ -58,10 +62,10 @@ for v in "${SECRET_VARS[@]}"; do
   [[ -n "${!v:-}" ]] || { echo "[ERROR] falta ${v} en ${SECRETS_FILE}."; exit 1; }
 done
 
-export TEAM RESOURCE_GROUP VNET DOCKERHUB_USER DOCKERHUB_TOKEN SUBSCRIPTION_ID
+export TEAM RESOURCE_GROUP VNET DOCKERHUB_USER DOCKERHUB_TOKEN SUBSCRIPTION_ID LAB_DOMAIN LAB_DNS_SERVER
 # Lista explicita: envsubst solo reemplaza estas variables y deja intactos otros ${...}/<...>
 # (p.ej. <DATABASE_IP>, que no usa sintaxis ${} y nunca corre riesgo de ser tocado).
-VARS='${TEAM} ${RESOURCE_GROUP} ${VNET} ${DOCKERHUB_USER} ${DOCKERHUB_TOKEN} ${SUBSCRIPTION_ID}'
+VARS='${TEAM} ${RESOURCE_GROUP} ${VNET} ${DOCKERHUB_USER} ${DOCKERHUB_TOKEN} ${SUBSCRIPTION_ID} ${LAB_DOMAIN} ${LAB_DNS_SERVER}'
 for v in "${SECRET_VARS[@]}"; do
   VARS="${VARS} \${${v}}"
 done
@@ -70,6 +74,12 @@ for svc in database webapp linux-server xss-bot; do
   in="${TEMPLATES}/team-${svc}.yaml.tpl"
   out="${OUTDIR}/team${TEAM}-${svc}.yaml"
   envsubst "$VARS" < "$in" > "$out"
+  # LAB_DNS_SERVER vacio == lab sin gateway (./lab-azure.sh test, o gateway no desplegado
+  # todavia): envsubst no sabe de condicionales, asi que el bloque con centinelas
+  # DNSCONFIG-BEGIN/END es la forma mas simple de dejar el YAML sin dnsConfig en ese caso.
+  if [[ -z "$LAB_DNS_SERVER" ]]; then
+    sed -i '/DNSCONFIG-BEGIN/,/DNSCONFIG-END/d' "$out"
+  fi
   echo "generado: $out"
 done
 

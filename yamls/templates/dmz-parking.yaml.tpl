@@ -14,6 +14,17 @@ properties:
         resources: {requests: {cpu: 0.25, memoryInGB: 0.5}}
         ports: [{port: 8080}]
 
+  # DNSCONFIG-BEGIN -- lo elimina el generador si LAB_DNS_SERVER esta vacio (lab sin gateway).
+  # 2o nameserver a proposito: si dnsmasq no responde, el contenedor sigue resolviendo internet
+  # via Azure DNS (ver docs/plans/internal-dns.md).
+  dnsConfig:
+    nameServers:
+      - "${LAB_DNS_SERVER}"
+      - "168.63.129.16"
+    searchDomains: "dmz.${LAB_DOMAIN} ${LAB_DOMAIN}"
+    options: "ndots:2 timeout:1 attempts:2"
+  # DNSCONFIG-END
+
   osType: Linux
   restartPolicy: Always
 

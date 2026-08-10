@@ -43,7 +43,7 @@ services:
       wiki-db:
         condition: service_healthy
     environment:
-      APP_URL: "http://wiki-int.empresa.local"
+      APP_URL: "http://wiki.dmz.${LAB_DOMAIN}"
       APP_KEY: "${WIKI_APP_KEY}"
       DB_HOST: wiki-db
       DB_PORT: "3306"
