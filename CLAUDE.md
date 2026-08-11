@@ -14,10 +14,30 @@ de `yamls/`.
 
 **Todo lo implementado se probó end-to-end el 2026-08-08**: `up`, `deploy-dmz`, `deploy-wiki-vm`,
 `deploy-wg-gateway`, `add-team`/`add-team-range` y el flujo VPN completo. Cuando un comentario del
-código diga "validado 2026-08-08", se refiere a esa corrida. Lo que **no** está implementado ni
-probado es: CTFd, Provisioner y Monitor (sin imagen en ningún repo todavía) y `docs/plans/network-segmentation-nsgs.md`
-y `docs/plans/observability-monitoring.md`, ambos marcados como diseño. Este archivo se va
-actualizando a medida que se toman decisiones de diseño.
+código diga "validado 2026-08-08", se refiere a esa corrida. CTFd se validó por separado el
+2026-08-11 (ver nota abajo). Lo que **no** está implementado ni probado es: Provisioner (sin
+imagen en ningún repo todavía) y `docs/plans/network-segmentation-nsgs.md`, marcado como diseño.
+Este archivo se va actualizando a medida que se toman decisiones de diseño.
+
+**CTFd (`docs/plans/ctfd-deployment.md`): F1 implementada del lado de `../sabana-corp-CTFd`
+(manifiesto de challenges + seed script). F2 — validada end-to-end contra Azure real
+(2026-08-11)**: `./lab-azure.sh deploy-ctfd-vm` crea `vm-ctfd` en `snet-dmz-vm` (nginx +
+ctfd/gunicorn + MariaDB + Redis vía docker-compose), completa `/setup` y carga los 5
+challenges/flags sin ningún click manual — `PRESET_ADMIN_TOKEN` (`CTFD_PRESET_ADMIN_TOKEN`)
+reemplaza el Access Token generado a mano, y `../sabana-corp-CTFd/scripts/seed_setup.py` (corre
+dentro del contenedor `ctfd`, no en la VM host) completa el wizard de `/setup` — necesario porque
+CTFd bloquea toda request, incluida la API, hasta que ese wizard termina. La corrida real encontró
+y corrigió dos bugs: `TRUSTED_HOSTS` no incluía `localhost` (los scripts de seed le pegan a CTFd
+por ahí, vía nginx, y sin eso Werkzeug devuelve 500) y `az vm run-command invoke` no propaga el
+exit code del script remoto (`--output table` puede reportar éxito con un script que en realidad
+tronó) — cualquier `run-command` nuevo debe capturar e inspeccionar `value[0].message`, no confiar
+en el exit code de `az`. Secretos vía bloque `CTFD_*` en `yamls/.env.secrets` (a diferencia del
+wiki, que usa literales). Imagen `${DOCKERHUB_USER}/sabana-corp-ctfd`, publicada por
+`../sabana-corp-CTFd/.github/workflows/deploy.yml`. **Los challenges se cargan `hidden` por
+defecto — `/challenges` se ve vacío incluso logueado como admin hasta que se publican
+(`CTFD_SEED_PUBLISH=1` en el deploy, o `seed_challenges.py --publish` sin recrear la VM).** Es
+diseño, no un bug — comandos exactos y runbook del día del evento en "Runbook del día del evento",
+`docs/plans/ctfd-deployment.md`.
 
 **DNS interno (`docs/plans/internal-dns.md`): validado contra Azure real (2026-08-10).** dnsmasq en
 `vm-wg-gateway`, dominio `sabanacorp.internal`, comandos `dns-sync [--from-azure]` / `dns-check
@@ -25,6 +45,23 @@ actualizando a medida que se toman decisiones de diseño.
 sincronizada y verificada end-to-end. Caveat: contenedores desplegados antes de esta sesión
 (team1, team2, DMZ) no reciben `dnsConfig` todavía (requeriría recreación); nuevos deploys lo
 reciben automáticamente. Detalle completo en `docs/plans/internal-dns.md`.
+
+**Observabilidad (`docs/plans/observability-monitoring.md`): F1+F2 implementados y validados
+contra Azure real (2026-08-10).** `./lab-azure.sh deploy-monitor-vm` crea `vm-monitor` en
+`snet-mgmt` (Prometheus + blackbox_exporter + Grafana + node_exporter, sin IP pública, managed
+identity con rol `Reader` solo sobre este Resource Group). `gen_targets.py` (systemd timer, 60s)
+descubre servicios vía `az container list` y genera targets de sondeo (`probe_success` por
+team/service) + `sabana_ip_drift`; el estado de control plane (`sabana_container_state`,
+`sabana_container_restart_count`) se refresca cada 5 min con `az container show` **por
+contenedor**, paralelizado y cacheado — corrección respecto al plan original, que asumía
+(incorrectamente) que `az container list` traía `instanceView` poblado; no lo hace, es la misma
+limitación ya documentada para `print_container_states()` en `lab-azure.sh`. Dos dashboards
+("Muro de equipos", "Muro DMZ + infraestructura") y 7 de las 9 reglas de alerta del plan
+provisionados como código en Grafana Unified Alerting (sin contact points). Quedan pendientes:
+`BotColgado` (requiere health endpoint en `bot.js`, repo `sabana-corp-network`, fuera de este
+repo) y `GatewaySinHandshakes` (requeriría subir el alcance de la managed identity más allá de
+`Reader`, no se justifica todavía). F3 (`restore team/dmz`) y F4 (logs) siguen sin implementar.
+Detalle completo en `docs/plans/observability-monitoring.md`.
 
 ## Comandos
 
@@ -211,10 +248,11 @@ desde el estado real de Azure, reenviando todo lo demás a Azure DNS (`168.63.12
 VPN.
 
 - **snet-dmz-shared** (`10.50.0.0/24`) — servicios compartidos por todos los equipos:
-  - CTFd (flags y scoreboard) — no implementado todavía
+  - CTFd (flags y scoreboard) — implementado y validado end-to-end (2026-08-11), pero vive en
+    `snet-dmz-vm`, no aquí (misma limitación de delegación exclusiva a ACI que sacó al wiki, ver
+    `snet-dmz-vm` abajo). Ver `docs/plans/ctfd-deployment.md`
   - Provisioner (FastAPI) — habla con la API de Azure/VPC para aprovisionar recursos de equipo — no implementado todavía
   - Objetivo de XSS contra un admin-bot — implementado como `filesrv`/`wiki`/`parking`/decoys (ver `yamls/templates/dmz-*.yaml.tpl`); el admin-bot en sí vive en `xss-bot` por equipo (`snet-teamN`), no en la DMZ
-  - Monitor (Prometheus + Grafana) para el staff — no implementado todavía (hay un decoy que imita uno, `dmz-decoy-monitor`, no confundir)
 - **snet-teamX** (`10.60.X.0/24`, una por equipo, `X` = número de equipo) — red propia de cada
   equipo, creada bajo demanda con `./lab-azure.sh add-team <X>`:
   - File-Srv — vulnerable a acceso anónimo, pivote hacia el siguiente nivel (vive en la DMZ compartida, no aquí — ver nota abajo)
@@ -222,12 +260,22 @@ VPN.
   - servicios decoy — simulan ruido corporativo (idem, DMZ compartida)
   - Parqueadero — reto final (idem, DMZ compartida)
   - Lo que sí vive en `snet-teamX`: `database`, `webapp`, `linux-server`, `xss-bot` (retos 1-3 del edificio de cada equipo)
-- **snet-mgmt** (`10.99.0.0/24`) — red de gestión, creada por `up`, sin servicios todavía
+- **snet-mgmt** (`10.99.0.0/24`) — red de gestión, creada por `up`. Aloja `vm-monitor`
+  (Prometheus + blackbox_exporter + Grafana + node_exporter, sin IP pública), creada por
+  `./lab-azure.sh deploy-monitor-vm` — **validado end-to-end 2026-08-10**, ver
+  `docs/plans/observability-monitoring.md`. Grafana solo alcanzable por el túnel admin de
+  WireGuard; `snet-mgmt` no se publica en el DNS interno a propósito (ver "Decisión de diseño:
+  DNS interno" arriba). No confundir con `dmz-decoy-monitor` (perfil `monitor`, señuelo del CTF
+  en `snet-dmz-shared` que imita un Grafana/Prometheus y no monitorea nada).
 - **snet-dmz-vm** (`10.51.0.0/24`) — DMZ paralela para servicios que no corren en ACI. Hoy aloja
   `vm-wiki` (wiki + wiki-db vía docker-compose), migrada de ACI porque BookStack requiere PID 1
   real (s6-overlay, limitación de ACI+VNet — validado end-to-end 2026-08-08). No puede ir en
   `snet-dmz-shared` porque esa subred está delegada a `Microsoft.ContainerInstance/containerGroups`
-  (delegación exclusiva, no admite VMs). Ver `docs/plans/wiki-on-vm.md` para el detalle.
+  (delegación exclusiva, no admite VMs). Ver `docs/plans/wiki-on-vm.md` para el detalle. También
+  aloja (`./lab-azure.sh deploy-ctfd-vm`, **validado end-to-end 2026-08-11**) `vm-ctfd`: nginx +
+  ctfd/gunicorn + MariaDB + Redis vía docker-compose, mismo motivo (docker-compose completo de
+  upstream, no vale la pena partirlo en YAML de ACI). Ver
+  `docs/plans/ctfd-deployment.md`.
 - **snet-wg-gateway** (`10.10.0.0/28`) — única entrada al lab **y DNS interno del lab**:
   `vm-wg-gateway` (IP pública, WireGuard UDP 51820, IP privada estática `10.10.0.4`), creada por
   `./lab-azure.sh deploy-wg-gateway`. `add-team <N>` genera automáticamente el túnel de ese equipo
@@ -258,17 +306,30 @@ control complementario al del gateway VPN, no un prerrequisito.
 ## Notas de archivos
 
 - `lab-azure.sh` — orquesta todo el ciclo de vida: infraestructura base (`up`), DMZ
-  (`deploy-dmz`), equipos (`add-team <N>`, `add-team-range`), wiki-vm (`deploy-wiki-vm`), gateway
-  VPN (`deploy-wg-gateway`), DNS interno (`dns-sync`, `dns-check`), estado (`status`) y destrucción
-  (`down`). Llama a los generadores de `yamls/` y resuelve las dependencias de IP entre
-  contenedores. Implementa paralelismo configurable en `add-team-range` (subnets secuenciales,
-  workloads paralelos, DNS en un solo push, peers secuenciales).
+  (`deploy-dmz`), equipos (`add-team <N>`, `add-team-range`), wiki-vm (`deploy-wiki-vm`), ctfd-vm
+  (`deploy-ctfd-vm`, validado end-to-end 2026-08-11), monitor-vm
+  (`deploy-monitor-vm`), gateway VPN (`deploy-wg-gateway`), DNS interno (`dns-sync`,
+  `dns-check`), estado (`status`) y destrucción (`down`). Llama a los generadores de `yamls/` y
+  resuelve las dependencias de IP entre contenedores. Implementa paralelismo configurable en
+  `add-team-range` (subnets secuenciales, workloads paralelos, DNS en un solo push, peers
+  secuenciales).
 - `.env` — `DOCKERHUB_USER` / `DOCKERHUB_TOKEN`; el script no lo carga automáticamente, hay que
   exportar las variables a mano antes de correr cualquier comando que despliegue contenedores.
 - `yamls/` — plantillas, generadores y documentación del despliegue por contenedor. Incluye:
-  - `templates/*.yaml.tpl` + `generate-*.sh` para DMZ/equipos/wiki-vm/clientes WireGuard
+  - `templates/*.yaml.tpl` + `generate-*.sh` para DMZ/equipos/wiki-vm/ctfd-vm/monitor-vm/clientes
+    WireGuard
   - `generate-dns-hosts.sh` — genera bloques de zona DNS (`generated/dns/*.hosts`)
   - `wg-gateway/` — VM cloud-init (WireGuard + dnsmasq), scripts remotos para gestión de peers y
     de la zona DNS del gateway
-  - `generated/` (gitignored) — YAML resueltos, clientes WireGuard generados y bloques de zona DNS
+  - `ctfd-vm/` — VM cloud-init (Docker) + `conf/nginx/http.conf` vendored desde
+    `../sabana-corp-CTFd`. `generate-ctfd-vm.sh` arma el bundle en `generated/ctfd/` (secretos
+    desde `.env.secrets`, bloque `CTFD_*`, a diferencia del wiki). Ver
+    `docs/plans/ctfd-deployment.md`.
+  - `monitor/` — VM cloud-init, docker-compose (Prometheus + blackbox_exporter + Grafana +
+    node_exporter), config de sondeo (`prometheus/`, `blackbox/`), provisioning de Grafana
+    (datasource + dashboards "Muro de equipos"/"Muro DMZ" + reglas de alerta Unified Alerting) y
+    `remote/gen_targets.py` (descubrimiento vía `az container list`, corre en `vm-monitor` cada
+    60s por systemd timer). Ver `docs/plans/observability-monitoring.md`.
+  - `generated/` (gitignored) — YAML resueltos, clientes WireGuard generados, bloques de zona DNS
+    y el bundle de `vm-monitor`
   Ver `yamls/README.md` para el detalle.

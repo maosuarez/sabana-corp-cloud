@@ -1,0 +1,201 @@
+# rules.yml -- Grafana Unified Alerting, provisionado como codigo (sin contact points, ver
+# "Decision de diseño: alerta visual en Grafana, sin Alertmanager" en
+# docs/plans/observability-monitoring.md). El staff opera con el dashboard en pantalla; estas
+# reglas solo alimentan el estado visual de alerta y su historia (cuando empezo, cuanto lleva).
+#
+# BotColgado no esta aqui: requiere el health endpoint de bot.js (/health, last_visit_ts,
+# browser_alive), que es un cambio en el repo sabana-corp-network, fuera de alcance de este repo
+# (ver "El punto ciego: xss-bot" en el plan).
+# GatewaySinHandshakes tampoco: requiere leer 'wg show wg0' via run-command contra
+# vm-wg-gateway, que exige un rol mas amplio que el Reader con el que se penso la managed identity
+# de vm-monitor (ver "Riesgos: la managed identity es el activo mas valioso de snet-mgmt" -- subir
+# el alcance de esa identidad solo para esta alerta no se justifica sin revisitar esa decision).
+apiVersion: 1
+
+groups:
+  - orgId: 1
+    name: sabana-corp-servicios
+    folder: sabana-corp
+    interval: 1m
+    rules:
+      - uid: sabana-servicio-caido
+        title: ServicioCaido
+        condition: C
+        for: 60s
+        labels:
+          severity: critical
+        annotations:
+          summary: "{{ $labels.service }} caido (team {{ $labels.team }})"
+          accion: "./lab-azure.sh restore team {{ $labels.team }} {{ $labels.service }}  (o restore dmz, si aplica)"
+        data:
+          - refId: A
+            relativeTimeRange: { from: 300, to: 0 }
+            datasourceUid: prometheus
+            model:
+              expr: probe_success{group="edificio"} == 0
+              instant: true
+              refId: A
+          - refId: C
+            datasourceUid: __expr__
+            model:
+              type: threshold
+              expression: A
+              conditions:
+                - evaluator: { type: gt, params: [0] }
+              refId: C
+
+      - uid: sabana-edificio-caido
+        title: EdificioCaido
+        condition: C
+        for: 60s
+        labels:
+          severity: critical
+        annotations:
+          summary: "Los 4 servicios de team {{ $labels.team }} estan caidos"
+          accion: "revisar la subred/pool de IPs de snet-team{{ $labels.team }}, no los contenedores uno a uno"
+        data:
+          - refId: A
+            relativeTimeRange: { from: 300, to: 0 }
+            datasourceUid: prometheus
+            model:
+              expr: sum by (team) (probe_success{group="edificio"}) == 0
+              instant: true
+              refId: A
+          - refId: C
+            datasourceUid: __expr__
+            model:
+              type: threshold
+              expression: A
+              conditions:
+                - evaluator: { type: gt, params: [0] }
+              refId: C
+
+      - uid: sabana-crash-loop
+        title: CrashLoop
+        condition: C
+        for: 0s
+        labels:
+          severity: critical
+        annotations:
+          summary: "{{ $labels.name }}: restartCount subio 3+ veces en 10 min"
+          accion: "mirar logs (az container logs) ANTES de reiniciar"
+        data:
+          - refId: A
+            relativeTimeRange: { from: 600, to: 0 }
+            datasourceUid: prometheus
+            model:
+              expr: increase(sabana_container_restart_count[10m]) >= 3
+              instant: true
+              refId: A
+          - refId: C
+            datasourceUid: __expr__
+            model:
+              type: threshold
+              expression: A
+              conditions:
+                - evaluator: { type: gt, params: [0] }
+              refId: C
+
+      - uid: sabana-deriva-ip
+        title: DerivaDeIP
+        condition: C
+        for: 60s
+        labels:
+          severity: critical
+        annotations:
+          summary: "team {{ $labels.team }}/{{ $labels.service }} tiene horneada una IP vieja de {{ $labels.depends_on }}"
+          accion: "./lab-azure.sh restore team {{ $labels.team }} {{ $labels.service }}"
+        data:
+          - refId: A
+            relativeTimeRange: { from: 300, to: 0 }
+            datasourceUid: prometheus
+            model:
+              expr: sabana_ip_drift == 1
+              instant: true
+              refId: A
+          - refId: C
+            datasourceUid: __expr__
+            model:
+              type: threshold
+              expression: A
+              conditions:
+                - evaluator: { type: gt, params: [0] }
+              refId: C
+
+      - uid: sabana-dmz-degradada
+        title: DMZDegradada
+        condition: C
+        for: 60s
+        labels:
+          severity: critical
+        annotations:
+          summary: "{{ $labels.service }} (DMZ compartida) caido -- afecta a TODOS los equipos"
+          accion: "prioridad maxima: ./lab-azure.sh restore dmz {{ $labels.service }}"
+        data:
+          - refId: A
+            relativeTimeRange: { from: 300, to: 0 }
+            datasourceUid: prometheus
+            model:
+              expr: probe_success{group="dmz"} == 0
+              instant: true
+              refId: A
+          - refId: C
+            datasourceUid: __expr__
+            model:
+              type: threshold
+              expression: A
+              conditions:
+                - evaluator: { type: gt, params: [0] }
+              refId: C
+
+      - uid: sabana-decoy-caido
+        title: DecoyCaido
+        condition: C
+        for: 5m
+        labels:
+          severity: low
+        annotations:
+          summary: "{{ $labels.service }} (decoy) caido hace 5+ min"
+          accion: "cosmetico, no bloquea ningun reto -- restaurar sin prisa"
+        data:
+          - refId: A
+            relativeTimeRange: { from: 600, to: 0 }
+            datasourceUid: prometheus
+            model:
+              expr: probe_success{group="dmz-decoy"} == 0
+              instant: true
+              refId: A
+          - refId: C
+            datasourceUid: __expr__
+            model:
+              type: threshold
+              expression: A
+              conditions:
+                - evaluator: { type: gt, params: [0] }
+              refId: C
+
+      - uid: sabana-dns-caido
+        title: DnsCaido
+        condition: C
+        for: 60s
+        labels:
+          severity: medium
+        annotations:
+          summary: "dnsmasq (vm-wg-gateway) no responde en 10.10.0.4:53"
+          accion: "nadie resuelve nombres, pero ningun reto se cae -- las env vars siguen en IP (ver docs/plans/internal-dns.md, Resiliencia)"
+        data:
+          - refId: A
+            relativeTimeRange: { from: 300, to: 0 }
+            datasourceUid: prometheus
+            model:
+              expr: probe_success{service="dns"} == 0
+              instant: true
+              refId: A
+          - refId: C
+            datasourceUid: __expr__
+            model:
+              type: threshold
+              expression: A
+              conditions:
+                - evaluator: { type: gt, params: [0] }
+              refId: C

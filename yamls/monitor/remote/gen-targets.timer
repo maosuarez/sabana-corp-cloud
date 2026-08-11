@@ -1,0 +1,10 @@
+[Unit]
+Description=Corre gen-targets.service cada 60s (ver docs/plans/observability-monitoring.md)
+
+[Timer]
+OnBootSec=30s
+OnUnitActiveSec=60s
+AccuracySec=5s
+
+[Install]
+WantedBy=timers.target

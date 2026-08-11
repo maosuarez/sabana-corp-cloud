@@ -14,13 +14,15 @@ Infraestructura automática para **Sabana Corp**, el Capture The Flag de la Sema
 - Resolución automática de IPs entre contenedores dependientes
 - **Gateway WireGuard** (`vm-wg-gateway`, snet-wg-gateway, IP pública, UDP 51820) con aislamiento de acceso por peer vía `iptables` — validado end-to-end 2026-08-08
 - **DNS interno** (dnsmasq en `vm-wg-gateway`, dominio `sabanacorp.internal`): nombres para equipos/DMZ resolubles desde contenedores ACI y desde el PC del participante por el túnel VPN — validado end-to-end 2026-08-10. Ver `docs/plans/internal-dns.md`
+- **CTFd** (flags y scoreboard en VM `vm-ctfd`, snet-dmz-vm, docker-compose: nginx + gunicorn + MariaDB + Redis) — validado end-to-end 2026-08-11. Challenges se cargan `hidden` por defecto; publicar con `CTFD_SEED_PUBLISH=1` o `seed_challenges.py --publish`. Ver `docs/plans/ctfd-deployment.md`
+- **Observabilidad** (Prometheus + Grafana en VM `vm-monitor`, snet-mgmt, descubrimiento vivo vía `az container list`, 2 dashboards, 7 reglas de alerta) — validado end-to-end 2026-08-10. Ver `docs/plans/observability-monitoring.md`
 
 **No implementado:**
-- **CTFd, Provisioner, Monitor**: no están en ningún repo, solo documentados en la arquitectura
+- **Provisioner** (aprovisionamiento automático de recursos de equipo): no tiene imagen/Dockerfile en ningún repo todavía, solo documentado en la arquitectura
 - **Segmentación NSG**: diseño completado en `docs/plans/network-segmentation-nsgs.md`, no aplicado (hoy todas las subredes se ven entre sí sin restricción dentro de la VNet)
 - **Persistencia persistente de wiki en VM**: los volúmenes de docker-compose (`wiki_mariadb_data`, `wiki_bookstack_config`) usan discos locales de la VM. Si la VM se destruye, se pierden — para un lab persistente, implementar Azure File Share
 
-La infraestructura base fue desplegada para prueba el 2026-08-01/02, validada exitosamente, y luego destruida. El **2026-08-08 se probó end-to-end el despliegue completo de todo lo implementado** (`up`, `deploy-dmz`, `deploy-wiki-vm`, `deploy-wg-gateway`, `add-team`/`add-team-range` y el flujo VPN). Lo único sin probar es lo que aún no existe: CTFd/Provisioner/Monitor y los planes de `docs/plans/` marcados como diseño.
+La infraestructura base fue desplegada para prueba el 2026-08-01/02, validada exitosamente, y luego destruida. El **2026-08-08 se probó end-to-end el despliegue completo de infraestructura + equipos** (`up`, `deploy-dmz`, `deploy-wiki-vm`, `deploy-wg-gateway`, `add-team`/`add-team-range` y el flujo VPN). El **2026-08-10 se validaron DNS interno y observabilidad** (`deploy-monitor-vm`). El **2026-08-11 se validó CTFd** (`deploy-ctfd-vm`). Lo único sin probar es lo que aún no existe: Provisioner y los planes de `docs/plans/` marcados como diseño.
 
 ## Requisitos previos
 
@@ -52,6 +54,13 @@ cp yamls/.env.secrets.example yamls/.env.secrets
 ```bash
 ./lab-azure.sh deploy-dmz            # Despliega 13 contenedores en snet-dmz-shared (filesrv, parking, decoys)
 ./lab-azure.sh deploy-wiki-vm        # Despliega vm-wiki en snet-dmz-vm con wiki+wiki-db via docker-compose
+./lab-azure.sh deploy-ctfd-vm        # Despliega vm-ctfd en snet-dmz-vm con CTFd (nginx+gunicorn+MariaDB+Redis)
+                                     # Carga /setup y challenges sin clicks manuales, pero quedan
+                                     # 'hidden' por defecto -- exporta CTFD_SEED_PUBLISH=1 antes del
+                                     # comando para publicarlos de una (o corre seed_challenges.py
+                                     # --publish contra el vm-ctfd ya desplegado, sin recrearlo)
+                                     # Validado end-to-end 2026-08-11 (ver docs/plans/ctfd-deployment.md,
+                                     # "Runbook del día del evento" para los comandos exactos)
 ```
 
 **Gateway VPN (opcional pero necesario si se requiere acceso remoto):**
@@ -59,6 +68,14 @@ cp yamls/.env.secrets.example yamls/.env.secrets
 ./lab-azure.sh deploy-wg-gateway     # Crea vm-wg-gateway (IP pública, WireGuard UDP 51820)
                                      # + genera client admin en yamls/generated/wg-clients/admin.conf
                                      # Validado end-to-end 2026-08-08 (ver docs/plans/wireguard-vpn-gateway.md)
+```
+
+**Observabilidad (opcional):**
+```bash
+./lab-azure.sh deploy-monitor-vm     # Despliega vm-monitor en snet-mgmt con Prometheus+Grafana+alertas
+                                     # Descubre servicios vía 'az container list', 2 dashboards,
+                                     # 7 reglas de alerta (sin contact points, requiere config manual)
+                                     # Validado end-to-end 2026-08-10 (ver docs/plans/observability-monitoring.md)
 ```
 
 **Equipos (secuencial o paralelo):**
@@ -127,7 +144,9 @@ Orquestación completa del ciclo de vida: crear/desplegar/destruir infraestructu
   - `up` — infraestructura base (RG, VNet, subredes, delegaciones)
   - `deploy-dmz` — 13 contenedores DMZ en ACI
   - `deploy-wiki-vm` — VM con wiki+wiki-db (docker-compose)
-  - `deploy-wg-gateway` — VM con WireGuard + peer admin
+  - `deploy-ctfd-vm` — VM con CTFd + MariaDB + Redis (docker-compose)
+  - `deploy-wg-gateway` — VM con WireGuard + peer admin + dnsmasq
+  - `deploy-monitor-vm` — VM con Prometheus + Grafana + alertas (descubrimiento vivo)
   - `add-team <N>` — crea equipo N (subred + 4 contenedores + peer WireGuard)
   - `add-team-range <inicio> <fin> [paralelismo]` — crea múltiples equipos en paralelo (opcional)
   - `wg-team-peer <N>` — genera solo el peer WireGuard de equipo N (backfill)
@@ -151,6 +170,8 @@ Plantillas y generadores para contenedores, VMs y clientes VPN.
 - **`.env.secrets`** (gitignored, plantilla en `.env.secrets.example`): FLAGS, contraseñas de BD, JWT_SIGNING_SECRET — compartidos por todos los equipos (por diseño de CTFd)
 - **`generated/`** (gitignored): salida de los generadores, YAML con secretos ya resueltos, cliente WireGuard .conf
 - **`wiki-vm/`**: cloud-init y docker-compose para la VM wiki (validado end-to-end 2026-08-08, ver `docs/plans/wiki-on-vm.md`)
+- **`ctfd-vm/`** + **`templates/ctfd-compose.yml.tpl`** + **`generate-ctfd-vm.sh`**: cloud-init, docker-compose adaptado de `../sabana-corp-CTFd/docker-compose.prod.yml` (nginx + ctfd/gunicorn + MariaDB + Redis) para VM en `snet-dmz-vm`. Primer arranque sin clicks: `generate-ctfd-vm.sh` vendorea `../sabana-corp-CTFd/scripts/seed_setup.py` a `generated/ctfd/seed/`, que `lab-azure.sh` ejecuta dentro del contenedor para completar `/setup` y cargar challenges. Secretos vía bloque `CTFD_*` en `.env.secrets`. Validado end-to-end 2026-08-11, ver `docs/plans/ctfd-deployment.md`
+- **`monitor/`** + **`templates/monitor-compose.yml.tpl`** / **`templates/monitor-gen-targets.service.tpl`** + **`generate-monitor.sh`**: cloud-init, docker-compose (Prometheus + blackbox_exporter + Grafana + node_exporter), configuración de sondeo, y provisioning de Grafana (datasources, dashboards, reglas de alerta). Descubrimiento vivo de servicios vía `az container list`; `remote/gen_targets.py` genera targets + métricas con paralelismo. Validado end-to-end 2026-08-10, ver `docs/plans/observability-monitoring.md`
 - **`wg-gateway/`**: cloud-init, scripts remotos, y plantillas para el gateway WireGuard VM (validado end-to-end 2026-08-08, ver `docs/plans/wireguard-vpn-gateway.md`). Incluye `remote/apply-dns.sh.tpl` (instala zonas DNS en dnsmasq — ver `docs/plans/internal-dns.md`)
 - **`generate-wg-client.sh`**: genera `.conf` + `-README.md` para clientes WireGuard (peers de equipos + admin)
 - **`generate-dns-hosts.sh`**: genera bloques de zona DNS (`generated/dns/*.hosts`) desde IPs conocidas o desde `az container list` — ver `docs/plans/internal-dns.md`
@@ -161,9 +182,10 @@ Ver `yamls/README.md` para detalles de orden de despliegue, resolución de IPs d
 Documentación de decisiones de diseño e implementación:
 - **`wiki-on-vm.md`**: por qué BookStack no corre en ACI (s6-overlay/PID1), plan e implementación de wiki+wiki-db en una VM con docker-compose (validado end-to-end 2026-08-08, cuota de VM desbloqueada tras upgrade a pay-as-you-go)
 - **`wireguard-vpn-gateway.md`**: diseño e implementación del gateway WireGuard (validado end-to-end 2026-08-08), incluyendo aislamiento de acceso por peer vía `iptables`
+- **`internal-dns.md`**: DNS interno del lab con dnsmasq en `vm-wg-gateway`, FQDN para equipos/DMZ resolubles también desde el PC del participante por el túnel — implementado y validado end-to-end 2026-08-10
+- **`ctfd-deployment.md`**: diseño e implementación de CTFd en `vm-ctfd` (flags y scoreboard), decisiones de despliegue (VM vs. ACI/Web App), automatización de challenges via `seed_setup.py`, runbook del evento — validado end-to-end 2026-08-11
+- **`observability-monitoring.md`**: Prometheus + Grafana para el staff (descubrimiento vivo, 2 dashboards, 7 reglas de alerta) — F1+F2 implementados y validados end-to-end 2026-08-10; F3/F4 (restore/logs) siguen en diseño
 - **`network-segmentation-nsgs.md`**: matriz de reglas NSG propuesta para aislar equipos entre sí y de la DMZ (diseño completado, no implementado), incluyendo notas de rollout
-- **`observability-monitoring.md`**: Prometheus + Grafana para el staff (diseño completado, no implementado)
-- **`internal-dns.md`**: DNS interno del lab con dnsmasq en `vm-wg-gateway`, FQDN para equipos/DMZ resolubles también desde el PC del participante por el túnel — implementado; pendiente validar Fase 0 (supuestos de `dnsConfig` en ACI) y pruebas de escala/resiliencia contra Azure real
 
 ## Costos
 
@@ -187,8 +209,8 @@ Nota: `az consumption usage list` suele devolver `403 AuthorizationFailed` en su
 Documentado en detalle en `CLAUDE.md` y `yamls/README.md`. Resumen:
 
 1. **Persistencia de wiki en VM limitada**: los volúmenes de docker-compose usan discos locales de la VM. Destruir la VM pierde datos — para un lab persistente, implementar Azure File Share
-2. **Sin segmentación de red (NSG)**: hoy un equipo puede alcanzar otros equipos (incluso dentro de la VNet sin pasar por VPN) — diseño completado pero no aplicado (ver `docs/plans/network-segmentation-nsgs.md`)
-3. **Sin CTFd/Provisioner/Monitor**: no implementados, solo documentados en la arquitectura
+2. **Sin Provisioner**: no tiene imagen/Dockerfile en ningún repo todavía; es el único servicio de la arquitectura original sin implementar
+3. **Sin segmentación de red (NSG)**: hoy un equipo puede alcanzar otros equipos (incluso dentro de la VNet sin pasar por VPN) — diseño completado pero no aplicado (ver `docs/plans/network-segmentation-nsgs.md`)
 4. **Sin validación de NSG asimétricos**: los NSGs aplicados hoy (solo al gateway WireGuard) son básicos; control de acceso más fino (equipos aislados, DMZ sin iniciar conexiones) requiere más validación
 
 ## Contribuir

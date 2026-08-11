@@ -120,6 +120,10 @@ case "${1:-}" in
       wiki_ip="$(az vm list-ip-addresses --resource-group "$RESOURCE_GROUP" --name vm-wiki \
         --query "[0].virtualMachine.network.privateIpAddresses[0]" --output tsv 2>/dev/null || true)"
       [[ -n "$wiki_ip" ]] && dmz_hosts_line wiki wiki-int "$wiki_ip"
+
+      ctfd_ip="$(az vm list-ip-addresses --resource-group "$RESOURCE_GROUP" --name vm-ctfd \
+        --query "[0].virtualMachine.network.privateIpAddresses[0]" --output tsv 2>/dev/null || true)"
+      [[ -n "$ctfd_ip" ]] && dmz_hosts_line ctfd scoreboard "$ctfd_ip"
     } > "$dmz_tmp"
     mv "$dmz_tmp" "$dmz_out"
     echo "generado: $dmz_out"
@@ -163,6 +167,10 @@ case "${1:-}" in
     wiki_ip="$(az vm list-ip-addresses --resource-group "$RESOURCE_GROUP" --name vm-wiki \
       --query "[0].virtualMachine.network.privateIpAddresses[0]" --output tsv 2>/dev/null || true)"
     [[ -n "$wiki_ip" ]] && dmz_hosts_line wiki wiki-int "$wiki_ip" >> "$dmz_tmp"
+
+    ctfd_ip="$(az vm list-ip-addresses --resource-group "$RESOURCE_GROUP" --name vm-ctfd \
+      --query "[0].virtualMachine.network.privateIpAddresses[0]" --output tsv 2>/dev/null || true)"
+    [[ -n "$ctfd_ip" ]] && dmz_hosts_line ctfd scoreboard "$ctfd_ip" >> "$dmz_tmp"
     mv "$dmz_tmp" "${OUTDIR}/dmz.hosts"
     echo "generado: ${OUTDIR}/dmz.hosts"
 

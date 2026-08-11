@@ -2,9 +2,28 @@
 
 ## Estado
 
-**Diseño, no implementado.** Ninguna fase de este documento existe todavía en el repo. Lo único
-que hay hoy es `./lab-azure.sh status`, que consulta el control plane de Azure bajo demanda y no
-guarda historia ni avisa de nada.
+**F1 (stack base + descubrimiento) y F2 (reglas de alerta) implementados y validados contra Azure
+real el 2026-08-10.** `./lab-azure.sh deploy-monitor-vm` crea `vm-monitor`; `status` ahora incluye
+su sección. F3 (`restore team/dmz`) y F4 (logs) siguen sin implementar. Ver `yamls/README.md`
+"Observabilidad" para el detalle operativo (rutas de host, gen_targets.py, etc).
+
+Dos correcciones sobre el diseño original de este documento, descubiertas al desplegar contra
+Azure real:
+
+1. **"Una sola `az container list`" no basta para el estado de control plane.** La sección
+   "Decision de diseño: descubrimiento" de abajo asumía que `instanceView.state` y
+   `containers[0].instanceView.restartCount` venían poblados en `az container list`. No es
+   cierto — es la misma limitación que ya obligó a `print_container_states()` (`lab-azure.sh`) a
+   usar `az container show` por contenedor. El *targeting* del blackbox (IP:puerto, que sí viene
+   en `list`) no se vio afectado; el estado de control plane (señal secundaria "b") se refresca
+   aparte, cada 5 min, paralelizado con `az container show` por contenedor y cacheado — sigue
+   siendo mucho menos agresivo que 93 llamadas/min, y la señal primaria (blackbox) no depende de
+   esto.
+2. **`GatewaySinHandshakes` no se implementó.** Requeriría que la managed identity de
+   `vm-monitor` pudiera invocar `run-command` contra `vm-wg-gateway` (leer `wg show wg0`), un rol
+   más amplio que `Reader` sobre el RG — no se justificó ampliar el alcance de la identidad solo
+   para esta alerta (ver "Riesgos" abajo, ya advertía sobre esto). Igual que `BotColgado` (bloqueada
+   por el health endpoint pendiente en `bot.js`), queda como trabajo futuro.
 
 No confundir con `dmz-decoy-monitor` (`sabanacorp-decoy`, perfil `monitor`, puertos 3000/9090 en
 `snet-dmz-shared`): eso es un señuelo del CTF que imita un Grafana/Prometheus y no monitorea

@@ -41,6 +41,14 @@
 #                                 # docs/plans/wiki-on-vm.md (cuota de VM desbloqueada ese mismo
 #                                 # dia tras upgrade a Pay-As-You-Go, 10 vCPUs
 #                                 # StandardDsv7Family en eastus2)
+#   ./lab-azure.sh deploy-ctfd-vm # crea vm-ctfd en snet-dmz-vm (nginx + ctfd + mariadb + redis via
+#                                 # docker-compose) -- F2 de docs/plans/ctfd-deployment.md, requiere
+#                                 # bloque CTFD_* en yamls/.env.secrets y la imagen
+#                                 # <DOCKERHUB_USER>/sabana-corp-ctfd ya publicada
+#   ./lab-azure.sh deploy-monitor-vm # crea vm-monitor en snet-mgmt (Prometheus + blackbox_exporter
+#                                 # + Grafana + node_exporter, sin IP publica, managed identity
+#                                 # Reader sobre el RG) -- F1+F2 de
+#                                 # docs/plans/observability-monitoring.md
 #   ./lab-azure.sh dns-sync            # empuja el estado LOCAL (yamls/generated/dns/*.hosts) al
 #                                # dnsmasq de vm-wg-gateway en una sola invocacion (O(1)) -- ver
 #                                # docs/plans/internal-dns.md
@@ -492,6 +500,267 @@ create_wiki_vm() {
 }
 
 # ---------------------------------------------------------------------------
+# Funciones — VM de CTFd (snet-dmz-vm, comparte subred con vm-wiki)
+# ---------------------------------------------------------------------------
+#
+# F2 de docs/plans/ctfd-deployment.md. Mismo patrón que create_wiki_vm(): cloud-init instala
+# Docker (+ python3-pip aquí), se empuja el bundle generado (docker-compose.yml +
+# conf/nginx/http.conf + seed/*) vía 'az vm run-command invoke'. A diferencia del wiki, los
+# secretos SÍ vienen de yamls/.env.secrets (bloque CTFD_*) -- decisión explícita del plan, ver
+# generate-ctfd-vm.sh.
+#
+# Al final corre, en orden, dos scripts vendored frescos desde ../sabana-corp-CTFd por
+# generate-ctfd-vm.sh -- ninguno depende de que el operador esté conectado al túnel VPN admin:
+#   1. seed_setup.py -- completa el wizard de /setup (nombre del evento, modo equipos, cuenta
+#      admin) DENTRO del contenedor ctfd ('docker compose exec'), porque CTFd bloquea CUALQUIER
+#      request -- incluida la API -- hasta que /setup esté hecho. No usa HTTP/CSRF: escribe
+#      directo contra los modelos de CTFd con contexto de Flask.
+#   2. seed_challenges.py -- carga challenges/flags contra la API REST, DESDE el host de la VM
+#      (http://localhost), autenticado con CTFD_PRESET_ADMIN_TOKEN (yamls/.env.secrets): CTFd lo
+#      acepta como Access Token de un admin que crea al vuelo (ver PRESET_ADMIN_TOKEN en
+#      templates/ctfd-compose.yml.tpl), así que tampoco hace falta generar un token a mano por
+#      la UI.
+create_ctfd_vm() {
+  local vm_size="${CTFD_VM_SIZE:-Standard_D2s_v7}"
+
+  echo "== VM de CTFd (docs/plans/ctfd-deployment.md, F2) =="
+  require_dockerhub_env
+
+  local secrets_file="${YAMLS_DIR}/.env.secrets"
+  [[ -f "$secrets_file" ]] || { echo "[ERROR] falta ${secrets_file}."; exit 1; }
+  set -a
+  # shellcheck disable=SC1090
+  source "$secrets_file"
+  set +a
+  : "${CTFD_PRESET_ADMIN_TOKEN:?Falta CTFD_PRESET_ADMIN_TOKEN en yamls/.env.secrets}"
+
+  echo "== az vm create: vm-ctfd (${vm_size}, snet-dmz-vm, sin IP publica) =="
+  az vm create \
+    --resource-group "$RG" \
+    --name vm-ctfd \
+    --image Ubuntu2204 \
+    --size "$vm_size" \
+    --vnet-name "$VNET" \
+    --subnet snet-dmz-vm \
+    --admin-username azureuser \
+    --generate-ssh-keys \
+    --public-ip-address "" \
+    --nsg "" \
+    --custom-data "${YAMLS_DIR}/ctfd-vm/cloud-init.yaml" \
+    --output table
+
+  local vm_ip
+  vm_ip="$(az vm list-ip-addresses -g "$RG" -n vm-ctfd --query "[0].virtualMachine.network.privateIpAddresses[0]" --output tsv)"
+
+  # La IP se conoce recién ahora (tras 'az vm create'), así que el bundle se genera DESPUÉS de
+  # crear la VM, no antes -- CTFD_VM_IP entra a TRUSTED_HOSTS (ver generate-ctfd-vm.sh) para que
+  # acceder por IP directa (no solo por el FQDN del DNS interno) no tire 500. Necesario porque el
+  # split-DNS de WireGuard no es confiable en clientes Linux (ver docs/plans/internal-dns.md) --
+  # encontrado en la validación real 2026-08-11, un operador en Linux navegó por IP y CTFd lo
+  # rechazó antes de este fix.
+  echo "== Generando bundle (yamls/generate-ctfd-vm.sh) =="
+  LAB_DOMAIN="$LAB_DOMAIN" CTFD_VM_IP="$vm_ip" "${YAMLS_DIR}/generate-ctfd-vm.sh"
+
+  echo "== Esperando a que Docker + pip queden listos (cloud-init) =="
+  local tries=0 max_tries=30
+  until az vm run-command invoke --resource-group "$RG" --name vm-ctfd \
+          --command-id RunShellScript --scripts "docker version && python3 -m pip --version" \
+          --query "value[0].message" --output tsv 2>/dev/null | grep -q "Server:"; do
+    tries=$((tries + 1))
+    if (( tries >= max_tries )); then
+      echo "[ERROR] docker/pip no quedaron listos tras $((max_tries * 15 / 60)) min. Revisa manualmente:" >&2
+      echo "  az vm run-command invoke -g ${RG} -n vm-ctfd --command-id RunShellScript --scripts 'cloud-init status --long'" >&2
+      exit 1
+    fi
+    echo "  ... vm-ctfd aún no lista (intento ${tries}/${max_tries}), esperando 15s"
+    sleep 15
+  done
+
+  echo "== Copiando el bundle a vm-ctfd, instalando deps del seed y desplegando (nginx + ctfd + db + cache) =="
+  local bundle_b64
+  bundle_b64="$(tar -C "${YAMLS_DIR}/generated/ctfd" -czf - . | base64 -w0)"
+  az vm run-command invoke \
+    --resource-group "$RG" --name vm-ctfd \
+    --command-id RunShellScript \
+    --scripts "mkdir -p /opt/ctfd && echo '${bundle_b64}' | base64 -d | tar xzf - -C /opt/ctfd && \
+      pip3 install -q -r /opt/ctfd/seed/requirements.txt && \
+      cd /opt/ctfd && docker compose up -d" \
+    --output table
+
+  echo "== Registrando ctfd.dmz en el DNS del lab =="
+  RESOURCE_GROUP="$RG" LAB_DOMAIN="$LAB_DOMAIN" WG_GW_TUNNEL_IP="$WG_GW_TUNNEL_IP" \
+    "${YAMLS_DIR}/generate-dns-hosts.sh" dmz
+  sync_lab_dns
+
+  # 'az vm run-command invoke' devuelve exit 0 y "ProvisioningState/succeeded" AUNQUE el script
+  # remoto termine con un exit code distinto de cero -- el resultado real vive solo en el texto de
+  # value[0].message (bloques [stdout]/[stderr]). Encontrado en la primera corrida real
+  # (2026-08-11): un curl -f fallando y un seed_challenges.py con traceback pasaron ambos
+  # desapercibidos porque el código de abajo confiaba en el exit code de 'az' o usaba
+  # '--output table' sin inspeccionar el mensaje. De aquí en adelante: capturar el mensaje,
+  # imprimirlo siempre (nada de '--output table' silencioso) y decidir éxito/error por su
+  # contenido, no por $?.
+
+  echo "== Esperando a que CTFd responda en localhost (dentro de vm-ctfd) =="
+  tries=0; max_tries=20
+  local http_code
+  while :; do
+    http_code="$(az vm run-command invoke --resource-group "$RG" --name vm-ctfd \
+      --command-id RunShellScript \
+      --scripts "curl -s -o /dev/null -w '%{http_code}' http://localhost/api/v1/challenges" \
+      --query "value[0].message" --output tsv 2>/dev/null \
+      | sed -n '/\[stdout\]/,/\[stderr\]/{//!p}' | tr -d '[:space:]')"
+    [[ "$http_code" =~ ^(2|3)[0-9][0-9]$ ]] && break
+    tries=$((tries + 1))
+    if (( tries >= max_tries )); then
+      echo "[ERROR] CTFd no respondió (último código HTTP: '${http_code:-sin respuesta}') tras $((max_tries * 15 / 60)) min. Revisa manualmente:" >&2
+      echo "  az vm run-command invoke -g ${RG} -n vm-ctfd --command-id RunShellScript --scripts 'docker compose -f /opt/ctfd/docker-compose.yml logs --tail 100'" >&2
+      exit 1
+    fi
+    echo "  ... ctfd aún no responde (código '${http_code:-sin respuesta}', intento ${tries}/${max_tries}), esperando 15s"
+    sleep 15
+  done
+
+  echo "== Completando /setup (seed_setup.py, corre dentro del contenedor ctfd via 'docker compose exec') =="
+  local setup_msg
+  setup_msg="$(az vm run-command invoke \
+    --resource-group "$RG" --name vm-ctfd \
+    --command-id RunShellScript \
+    --scripts "cd /opt/ctfd && docker compose exec -T ctfd python3 - < seed/seed_setup.py" \
+    --query "value[0].message" --output tsv 2>/dev/null)"
+  echo "$setup_msg"
+  if ! grep -qE "CTFd (ya esta )?configurado" <<<"$setup_msg"; then
+    echo "[ERROR] seed_setup.py no confirmó éxito (ver mensaje arriba)." >&2
+    exit 1
+  fi
+
+  echo "== Cargando challenges/flags (seed_challenges.py, vendored desde sabana-corp-CTFd) =="
+  local publish_flag=""
+  [[ "${CTFD_SEED_PUBLISH:-}" == "1" ]] && publish_flag="--publish"
+  local seed_msg
+  seed_msg="$(az vm run-command invoke \
+    --resource-group "$RG" --name vm-ctfd \
+    --command-id RunShellScript \
+    --scripts "cd /opt/ctfd && CTFD_URL=http://localhost CTFD_API_TOKEN='${CTFD_PRESET_ADMIN_TOKEN}' python3 seed/seed_challenges.py --manifest seed/challenges.yml --env-file seed/flags.env ${publish_flag}" \
+    --query "value[0].message" --output tsv 2>/dev/null)"
+  echo "$seed_msg"
+  if grep -q "^error:" <<<"$seed_msg" || ! grep -q "^OK  " <<<"$seed_msg"; then
+    echo "[ERROR] seed_challenges.py no confirmó éxito (ver mensaje arriba)." >&2
+    exit 1
+  fi
+
+  echo ""
+  echo "== VM de CTFd desplegada (IP privada: ${vm_ip}) — ver docs/plans/ctfd-deployment.md (F2) =="
+  echo "  http://${vm_ip} o http://ctfd.dmz.${LAB_DOMAIN} (via tunel VPN)"
+  echo "  admin: ${CTFD_PRESET_ADMIN_EMAIL} / (password en yamls/.env.secrets, CTFD_PRESET_ADMIN_PASSWORD)"
+  if [[ -n "$publish_flag" ]]; then
+    echo "  Challenges cargados y PUBLICADOS (CTFD_SEED_PUBLISH=1)."
+  else
+    echo "  Challenges cargados OCULTOS -- correr con CTFD_SEED_PUBLISH=1 para publicarlos, o desde la UI."
+  fi
+  echo "  az vm run-command invoke -g ${RG} -n vm-ctfd --command-id RunShellScript --scripts 'docker compose -f /opt/ctfd/docker-compose.yml ps'"
+}
+
+# ---------------------------------------------------------------------------
+# Funciones — VM de monitoreo (snet-mgmt, 10.99.0.0/24)
+# ---------------------------------------------------------------------------
+#
+# F1+F2 de docs/plans/observability-monitoring.md: Prometheus + blackbox_exporter (sondeo externo,
+# cero cambios en las imagenes de los retos) + Grafana (dashboard "muro de equipos" + alertas
+# Unified sin contact points) + node_exporter (metricas propias + textfile collector). Mismo
+# patron que create_wiki_vm(): cloud-init instala Docker (y aqui ademas Azure CLI), y el resto se
+# empuja via 'az vm run-command invoke' -- solo que aca es un bundle entero (tar+base64), no un
+# solo archivo, porque el stack tiene mas piezas (prometheus.yml, blackbox.yml, provisioning de
+# Grafana, el script de descubrimiento).
+#
+# Managed identity con Reader SOLO sobre este Resource Group (nunca sobre la suscripcion) -- ver
+# "Riesgos: la managed identity es el activo mas valioso de snet-mgmt" en el plan.
+create_monitor_vm() {
+  local vm_size="${MONITOR_VM_SIZE:-Standard_D2s_v7}"
+
+  echo "== VM de monitoreo (docs/plans/observability-monitoring.md, F1+F2) =="
+  echo "== Generando bundle (yamls/generate-monitor.sh) =="
+  RESOURCE_GROUP="$RG" "${YAMLS_DIR}/generate-monitor.sh"
+
+  echo "== az vm create: vm-monitor (${vm_size}, snet-mgmt, sin IP publica, managed identity) =="
+  az vm create \
+    --resource-group "$RG" \
+    --name vm-monitor \
+    --image Ubuntu2204 \
+    --size "$vm_size" \
+    --vnet-name "$VNET" \
+    --subnet snet-mgmt \
+    --admin-username azureuser \
+    --generate-ssh-keys \
+    --public-ip-address "" \
+    --nsg "" \
+    --assign-identity '[system]' \
+    --custom-data "${YAMLS_DIR}/monitor/cloud-init.yaml" \
+    --output table
+
+  echo "== Asignando rol Reader (alcance: solo este Resource Group) a la managed identity =="
+  local principal_id sub_id tries max_tries
+  principal_id="$(az vm identity show --resource-group "$RG" --name vm-monitor --query principalId --output tsv)"
+  sub_id="$(get_subscription_id)"
+  tries=0; max_tries=10
+  # Reintento: una identidad recien creada en Entra ID puede tardar unos segundos en propagar
+  # antes de que 'role assignment create' la reconozca (PrincipalNotFound transitorio, no un
+  # error real de permisos).
+  until az role assignment create \
+          --assignee-object-id "$principal_id" --assignee-principal-type ServicePrincipal \
+          --role Reader --scope "/subscriptions/${sub_id}/resourceGroups/${RG}" \
+          --output none 2>/dev/null; do
+    tries=$((tries + 1))
+    if (( tries >= max_tries )); then
+      echo "[ERROR] no se pudo asignar el rol Reader tras ${max_tries} intentos." >&2
+      exit 1
+    fi
+    echo "  ... identidad aun no propagada (intento ${tries}/${max_tries}), esperando 10s"
+    sleep 10
+  done
+
+  echo "== Esperando a que Docker + Azure CLI queden listos (cloud-init) =="
+  tries=0; max_tries=30
+  until az vm run-command invoke --resource-group "$RG" --name vm-monitor \
+          --command-id RunShellScript --scripts "docker version && az version" \
+          --query "value[0].message" --output tsv 2>/dev/null | grep -q "Server:"; do
+    tries=$((tries + 1))
+    if (( tries >= max_tries )); then
+      echo "[ERROR] docker/az cli no quedaron listos tras $((max_tries * 15 / 60)) min. Revisa manualmente:" >&2
+      echo "  az vm run-command invoke -g ${RG} -n vm-monitor --command-id RunShellScript --scripts 'cloud-init status --long'" >&2
+      exit 1
+    fi
+    echo "  ... vm-monitor aun no lista (intento ${tries}/${max_tries}), esperando 15s"
+    sleep 15
+  done
+
+  echo "== Copiando el bundle a vm-monitor y desplegando (prometheus + blackbox + grafana + node-exporter) =="
+  local bundle_b64
+  bundle_b64="$(tar -C "${YAMLS_DIR}/generated/monitor" -czf - . | base64 -w0)"
+  az vm run-command invoke \
+    --resource-group "$RG" --name vm-monitor \
+    --command-id RunShellScript \
+    --scripts "mkdir -p /opt/monitor && echo '${bundle_b64}' | base64 -d | tar xzf - -C /opt/monitor && \
+      mkdir -p /etc/prometheus/targets /etc/node_exporter/textfile && \
+      cp /opt/monitor/gen-targets.service /etc/systemd/system/gen-targets.service && \
+      cp /opt/monitor/remote/gen-targets.timer /etc/systemd/system/gen-targets.timer && \
+      systemctl daemon-reload && systemctl enable --now gen-targets.timer && \
+      systemctl start gen-targets.service && \
+      cd /opt/monitor && docker compose up -d" \
+    --output table
+
+  local vm_ip
+  vm_ip="$(az vm list-ip-addresses -g "$RG" -n vm-monitor --query "[0].virtualMachine.network.privateIpAddresses[0]" --output tsv)"
+
+  echo ""
+  echo "== VM de monitoreo desplegada (IP privada: ${vm_ip}) =="
+  echo "== Grafana: http://${vm_ip}:3000 (admin / GRAFANA_ADMIN_PASSWORD, ver yamls/generate-monitor.sh) =="
+  echo "== Solo alcanzable por el tunel admin de WireGuard (AllowedIPs=10.0.0.0/8 cubre snet-mgmt) =="
+  echo "== NO se registra en el DNS interno a proposito: snet-mgmt no se publica (ver docs/plans/internal-dns.md) =="
+  echo "== Punto ciego conocido: xss-bot sin sonda propia todavia (ver 'El punto ciego: xss-bot' en el plan) =="
+}
+
+# ---------------------------------------------------------------------------
 # Funciones — Gateway WireGuard (snet-wg-gateway, 10.10.0.0/28)
 # ---------------------------------------------------------------------------
 #
@@ -833,6 +1102,24 @@ status() {
     echo "  vm-wiki no existe (correr: ./lab-azure.sh deploy-wiki-vm)"
   fi
 
+  if az vm show --resource-group "$RG" --name vm-ctfd --output none 2>/dev/null; then
+    local ctfd_power ctfd_ip
+    ctfd_power="$(az vm get-instance-view --resource-group "$RG" --name vm-ctfd \
+      --query "instanceView.statuses[?starts_with(code, 'PowerState/')].displayStatus | [0]" --output tsv)"
+    ctfd_ip="$(az vm list-ip-addresses --resource-group "$RG" --name vm-ctfd \
+      --query "[0].virtualMachine.network.privateIpAddresses[0]" --output tsv)"
+    printf "  %-22s %-18s %s\n" "vm-ctfd" "$ctfd_power" "$ctfd_ip"
+    if [[ "$ctfd_power" == "VM running" ]]; then
+      echo "  docker compose (nginx + ctfd + db + cache):"
+      az vm run-command invoke --resource-group "$RG" --name vm-ctfd --command-id RunShellScript \
+        --scripts "docker compose -f /opt/ctfd/docker-compose.yml ps --format 'table {{.Name}}\t{{.Status}}'" \
+        --query "value[0].message" --output tsv 2>/dev/null \
+        | sed -n '/\[stdout\]/,/\[stderr\]/{//!p}' | sed 's/^/    /'
+    fi
+  else
+    echo "  vm-ctfd no existe (correr: ./lab-azure.sh deploy-ctfd-vm)"
+  fi
+
   echo ""
   echo "== Gateway WireGuard (snet-wg-gateway) =="
   if az vm show --resource-group "$RG" --name vm-wg-gateway --output none 2>/dev/null; then
@@ -859,6 +1146,27 @@ status() {
   echo ""
   echo "== Equipos (snet-teamN) =="
   print_container_states "team"
+
+  echo ""
+  echo "== Monitoreo (snet-mgmt) =="
+  if az vm show --resource-group "$RG" --name vm-monitor --output none 2>/dev/null; then
+    local mon_power mon_ip
+    mon_power="$(az vm get-instance-view --resource-group "$RG" --name vm-monitor \
+      --query "instanceView.statuses[?starts_with(code, 'PowerState/')].displayStatus | [0]" --output tsv)"
+    mon_ip="$(az vm list-ip-addresses --resource-group "$RG" --name vm-monitor \
+      --query "[0].virtualMachine.network.privateIpAddresses[0]" --output tsv)"
+    printf "  %-22s %-18s %s\n" "vm-monitor" "$mon_power" "$mon_ip"
+    if [[ "$mon_power" == "VM running" ]]; then
+      echo "  docker compose (prometheus + blackbox + grafana + node-exporter):"
+      az vm run-command invoke --resource-group "$RG" --name vm-monitor --command-id RunShellScript \
+        --scripts "docker compose -f /opt/monitor/docker-compose.yml ps --format 'table {{.Name}}\t{{.Status}}'" \
+        --query "value[0].message" --output tsv 2>/dev/null \
+        | sed -n '/\[stdout\]/,/\[stderr\]/{//!p}' | sed 's/^/    /'
+      echo "  Grafana: http://${mon_ip}:3000 (tunel admin de WireGuard)"
+    fi
+  else
+    echo "  vm-monitor no existe (correr: ./lab-azure.sh deploy-monitor-vm)"
+  fi
 }
 
 test_deploy() {
@@ -896,6 +1204,8 @@ case "${1:-}" in
   add-team)          shift; deploy_team "${1:-}" ;;
   add-team-range)    shift; add_team_range "${1:-}" "${2:-}" "${3:-1}" ;;
   deploy-wiki-vm)    create_wiki_vm ;;
+  deploy-ctfd-vm)    create_ctfd_vm ;;
+  deploy-monitor-vm) create_monitor_vm ;;
   deploy-wg-gateway) deploy_wg_gateway ;;
   wg-team-peer)
     # Backfill: genera el peer/tunel WireGuard de un equipo que ya fue desplegado con add-team
@@ -927,7 +1237,7 @@ case "${1:-}" in
   status)            status ;;
   down)              down ;;
   *)
-    echo "Uso: $0 {up|deploy-dmz|add-team <N>|add-team-range <inicio> <fin> [paralelismo]|deploy-wiki-vm|deploy-wg-gateway|wg-team-peer <N>|dns-sync [--from-azure]|dns-check <fqdn>|test [N]|status|down}"
+    echo "Uso: $0 {up|deploy-dmz|add-team <N>|add-team-range <inicio> <fin> [paralelismo]|deploy-wiki-vm|deploy-ctfd-vm|deploy-monitor-vm|deploy-wg-gateway|wg-team-peer <N>|dns-sync [--from-azure]|dns-check <fqdn>|test [N]|status|down}"
     exit 1
     ;;
 esac

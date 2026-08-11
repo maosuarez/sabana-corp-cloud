@@ -1,0 +1,15 @@
+#cloud-config
+# Ver docs/plans/observability-monitoring.md (F1). Instala Docker Engine + plugin compose (mismo
+# patron que yamls/wiki-vm/cloud-init.yaml) mas Azure CLI + jq, que gen-targets.sh necesita para
+# hablar con el control plane via managed identity ('az login --identity').
+package_update: true
+packages:
+  - ca-certificates
+  - curl
+  - jq
+
+runcmd:
+  - curl -fsSL https://get.docker.com | sh
+  - systemctl enable --now docker
+  - usermod -aG docker azureuser
+  - curl -sL https://aka.ms/InstallAzureCLIDeb | bash

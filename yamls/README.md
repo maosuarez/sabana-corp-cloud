@@ -46,6 +46,19 @@ en vez de ACI (workaround al problema de s6-overlay/PID1 documentado en la memor
 La resolución de nombres entre `wiki` y `wiki-db` funciona nativamente vía la red de Docker
 `wiki_backend` del compose, sin necesidad de inyección de IP.
 
+**`templates/ctfd-compose.yml.tpl`** / **`generate-ctfd-vm.sh`** / **`ctfd-vm/`** — F2 de
+`docs/plans/ctfd-deployment.md`, **validado end-to-end contra Azure real (2026-08-11)**.
+Mismo patrón que wiki (VM en `snet-dmz-vm`, `lab-azure.sh deploy-ctfd-vm`), stack completo
+adaptado de `../sabana-corp-CTFd/docker-compose.prod.yml` (nginx + ctfd/gunicorn + MariaDB +
+Redis). A diferencia del wiki, los secretos (`SECRET_KEY`, credenciales de DB, admin precreado)
+sí vienen de `.env.secrets` (bloque `CTFD_*`) — decisión explícita del plan, ver
+`generate-ctfd-vm.sh`. Imagen: `${DOCKERHUB_USER}/sabana-corp-ctfd`, publicada por
+`../sabana-corp-CTFd/.github/workflows/deploy.yml`. Primer arranque sin clicks manuales:
+`create_ctfd_vm()` corre `../sabana-corp-CTFd/scripts/seed_setup.py` (vendored en
+`generated/ctfd/seed/`, ejecuta dentro del contenedor `ctfd` vía `docker compose exec`) para
+completar el wizard de `/setup`, y `CTFD_PRESET_ADMIN_TOKEN` (`PRESET_ADMIN_TOKEN` nativo de CTFd)
+reemplaza el Access Token que normalmente hay que generar a mano por la UI.
+
 **`.env.secrets`** (gitignored, plantilla en `.env.secrets.example`) — flags y secretos de los
 servicios **por equipo**, **compartidos por todos los equipos**: `add-team 1` y `add-team 2`
 producen el mismo `FLAG_DATABASE`, `FLAG_WEBAPP_XSS`, etc. Solo cambia el nombre del container
@@ -58,8 +71,41 @@ Los secretos/flags de la DMZ (`dmz-parking`, y los del wiki en `generate-wiki-vm
 embebidos como literales en sus plantillas — no pasan por `.env.secrets` todavía porque la DMZ es
 un único despliegue compartido, no N copias por equipo.
 
-CTFd, Provisioner y Monitor (mencionados en la arquitectura de `snet-dmz-shared`) todavía no
-tienen imagen/Dockerfile en ningún repo — no se generó YAML para ellos.
+Provisioner (mencionado en la arquitectura de `snet-dmz-shared`) todavía no tiene imagen/Dockerfile
+en ningún repo. CTFd sí tiene imagen (`sabana-corp-ctfd`, cuenta Docker Hub del operador) y está
+implementado y validado end-to-end contra Azure real (ver `ctfd-vm/`/`generate-ctfd-vm.sh` arriba)
+— ver `docs/plans/ctfd-deployment.md`. Monitor también está implementado y validado, ver
+"Observabilidad" abajo (vive en `snet-mgmt`, no en `snet-dmz-shared`).
+
+## Observabilidad (Prometheus + Grafana en `vm-monitor`)
+
+F1+F2 implementados y validados contra Azure real (2026-08-10) — ver
+`docs/plans/observability-monitoring.md` para el diseño completo.
+
+- **`monitor/`** — cloud-init (Docker + Azure CLI), `prometheus/prometheus.yml`,
+  `blackbox/blackbox.yml` (módulos `tcp_connect`/`http_2xx`/`ssh_banner`/`dns_udp`),
+  `grafana/provisioning/` (datasource, dashboards "Muro de equipos"/"Muro DMZ", 7 reglas de
+  alerta Unified Alerting) y `remote/gen_targets.py` (corre en `vm-monitor` cada 60s).
+- **`templates/monitor-compose.yml.tpl`** / **`templates/monitor-gen-targets.service.tpl`** /
+  **`generate-monitor.sh`** — mismo patrón que `generate-wiki-vm.sh`: resuelven las plantillas
+  (`GRAFANA_ADMIN_PASSWORD`, `RESOURCE_GROUP`) y copian el resto de `monitor/` tal cual a
+  `generated/monitor/`, que `lab-azure.sh` empaqueta (tar+base64) y empuja a `vm-monitor` en una
+  sola invocación de `run-command` (mismo mecanismo que `sync_lab_dns`).
+- **`gen_targets.py`** descubre servicios vía `az container list` (una sola llamada) y escribe
+  `aci_targets.json` (file_sd de Prometheus) + `sabana_ip_drift`. El estado de control plane
+  (`sabana_container_state`, `sabana_container_restart_count`) necesita `az container show` **por
+  contenedor** — `az container list` no trae `instanceView` poblado (misma limitación que
+  `print_container_states()` en `lab-azure.sh`) — así que se refresca cada 5 min (no en cada tick
+  de 60s), paralelizado con un pool acotado y cacheado en disco, para no convertirse en 93
+  llamadas/min al control plane.
+- **Rutas de host que tienen que coincidir literalmente** entre `gen_targets.py` y
+  `templates/monitor-compose.yml.tpl`: `/etc/prometheus/targets` y `/etc/node_exporter/textfile`.
+  El script escribe ahí directamente (no en `/opt/monitor/...`) y el compose monta esas mismas
+  rutas del host — un mismatch aquí deja los targets/métricas invisibles para los contenedores
+  sin que ningún comando falle (ya pasó una vez en la validación de 2026-08-10, ver commit).
+- Pendiente: `BotColgado` (requiere health endpoint en `bot.js`, repo `sabana-corp-network`) y
+  `GatewaySinHandshakes` (requeriría más permisos que `Reader` para la managed identity). F3
+  (`restore team/dmz`) y F4 (logs) sin implementar.
 
 ## DNS interno (dnsmasq en `vm-wg-gateway`)
 
@@ -125,7 +171,9 @@ en `docs/plans/internal-dns.md` ("El huevo y la gallina").
   (`deploy-wiki-vm`). Los volúmenes persistentes (`wiki_mariadb_data`, `wiki_bookstack_config`)
   funcionan nativamente en Docker plano, lo que resuelve tanto el problema de s6-overlay/PID1 como
   el de persistencia de configuración de BookStack (validado end-to-end 2026-08-08).
-- **CTFd / Provisioner / Monitor**: no implementados todavía en ningún repo.
+- **CTFd**: implementado y validado end-to-end contra Azure real (`deploy-ctfd-vm`, 2026-08-11) —
+  ver `docs/plans/ctfd-deployment.md`. **Provisioner**: no implementado todavía en ningún repo.
+  **Monitor**: implementado y validado, ver "Observabilidad" arriba.
 - **Conector VPN**: resuelto. Gateway WireGuard implementado y validado end-to-end 2026-08-08
   (ver `docs/plans/wireguard-vpn-gateway.md`, comandos `deploy-wg-gateway` y `wg-team-peer` en
   `lab-azure.sh`).
