@@ -1,0 +1,50 @@
+name: Publish nmap-sabana-corp to npm
+
+# Mismo patron que ../sabana-corp-CTFd/.github/workflows/deploy.yml: build/test/publish
+# disparado por un tag, nada de publicar a mano desde una laptop (irrepetible, sin rastro). Ver
+# docs/plans/nmap-sabana-corp.md, "Publicacion y versionado".
+on:
+  push:
+    tags:
+      - "nmap-v*"
+
+jobs:
+  publish:
+    runs-on: ubuntu-latest
+    defaults:
+      run:
+        working-directory: tools/nmap-sabana-corp
+    permissions:
+      contents: read
+      id-token: write # requerido por --provenance
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v5
+
+      - name: Set up Node
+        uses: actions/setup-node@v4
+        with:
+          node-version: "20"
+          registry-url: "https://registry.npmjs.org"
+
+      - name: Install (sin dependencias de runtime, solo valida el lockfile)
+        run: npm ci
+
+      - name: Test
+        run: npm test
+
+      - name: Verificar que el tag coincide con package.json
+        run: |
+          tag_version="${GITHUB_REF_NAME#nmap-v}"
+          pkg_version="$(node -p "require('./package.json').version")"
+          if [[ "$tag_version" != "$pkg_version" ]]; then
+            echo "[ERROR] tag nmap-v${tag_version} no coincide con package.json (${pkg_version})" >&2
+            exit 1
+          fi
+
+      # Secret a inyectar en Settings > Secrets and variables > Actions: NPM_TOKEN
+      # (npm Access Token con permiso de publish sobre el paquete nmap-sabana-corp).
+      - name: Publish
+        run: npm publish --provenance --access public
+        env:
+          NODE_AUTH_TOKEN: ${{ secrets.NPM_TOKEN }}

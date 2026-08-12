@@ -1,0 +1,28 @@
+{
+  "name": "nmap-sabana-corp",
+  "version": "0.1.0-draft",
+  "description": "Descubrimiento de red sin privilegios para el CTF de Sabana Corp -- alcance desde el tunel WireGuard, resultados desde TCP connect real, nombres desde el DNS del lab.",
+  "keywords": ["ctf", "network-discovery", "wireguard", "port-scan"],
+  "license": "MIT",
+  "type": "module",
+  "engines": {
+    "node": ">=18"
+  },
+  "bin": {
+    "nmap-sabana-corp": "bin/cli.js"
+  },
+  "files": [
+    "bin",
+    "src",
+    "README.md"
+  ],
+  "scripts": {
+    "test": "node --test test/*.test.js",
+    "build:bundle": "node scripts/build-bundle.mjs"
+  },
+  "repository": {
+    "type": "git",
+    "url": "git+https://github.com/maosuarez/sabana-corp-cloud.git",
+    "directory": "tools/nmap-sabana-corp"
+  }
+}

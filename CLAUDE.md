@@ -63,6 +63,23 @@ repo) y `GatewaySinHandshakes` (requeriría subir el alcance de la managed ident
 `Reader`, no se justifica todavía). F3 (`restore team/dmz`) y F4 (logs) siguen sin implementar.
 Detalle completo en `docs/plans/observability-monitoring.md`.
 
+**`nmap-sabana-corp` (`docs/plans/nmap-sabana-corp.md`): paquete implementado en
+`tools/nmap-sabana-corp/`, NO validado contra el lab real.** Herramienta de descubrimiento de red
+para el participante (Node ≥18, ESM, cero dependencias de runtime): alcance derivado del túnel
+WireGuard activo (o `--conf`/`--cidr`), hechos medidos con TCP connect scan real en dos fases, y
+nombres decorados vía PTR contra el resolutor del lab (`10.200.0.1`) — nunca al revés. `npm --test`
+pasa (36 pruebas unitarias, sin infraestructura real). `generate-wg-client.sh` genera
+`nmap-sabana-corp.mjs` (bundle de un solo archivo, vía `tools/nmap-sabana-corp/scripts/build-bundle.mjs`,
+sin bundler externo) junto a cada `.conf` en `yamls/generated/wg-clients/`, y el README del
+participante (`yamls/templates/wg-client-readme.md.tpl`) ya lo documenta. Workflow de publicación
+(`.github/workflows/nmap-sabana-corp.yml`, tag `nmap-v*`) escrito pero nunca corrido — falta
+`NPM_TOKEN` en secrets y reservar el nombre en npm. **Pendiente, explícitamente fuera de esta
+implementación**: los tres supuestos de Fase 0 del plan (PTR desde un túnel real, comportamiento de
+puerto cerrado en ACI, presión de conntrack en el gateway con N equipos), el `sysctl` de conntrack
+en `vm-wg-gateway` (Fase 3), y la publicación real a npm. No tocar `yamls/wg-gateway/cloud-init.yaml`
+ni el gateway vivo para eso sin releer "Lo que se rompe primero" en el plan primero — es el riesgo
+real del diseño.
+
 ## Comandos
 
 ```bash

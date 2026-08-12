@@ -56,3 +56,17 @@ readme_out="${OUTDIR}/${PEER_NAME}-README.md"
 envsubst '${PEER_NAME} ${LAB_DOMAIN} ${TEAM_SERVICES_BLOCK}' \
   < "${WORKDIR}/templates/wg-client-readme.md.tpl" > "$readme_out"
 echo "generado: $readme_out"
+
+# Bundle de un solo archivo de nmap-sabana-corp (docs/plans/nmap-sabana-corp.md, "Distribucion al
+# participante", capa 2) -- no depende de PEER_NAME, se regenera igual en cada llamada porque no
+# hay estado de equipo que cachear y el costo es una concatenacion de unos pocos KB (<100ms).
+NMAP_TOOL_DIR="${WORKDIR}/../tools/nmap-sabana-corp"
+if [[ -f "${NMAP_TOOL_DIR}/scripts/build-bundle.mjs" ]]; then
+  if command -v node >/dev/null 2>&1; then
+    node "${NMAP_TOOL_DIR}/scripts/build-bundle.mjs" "${OUTDIR}/nmap-sabana-corp.mjs"
+  else
+    echo "[WARN] 'node' no disponible -- no se genero nmap-sabana-corp.mjs (el participante puede seguir usando 'npm i -g nmap-sabana-corp')." >&2
+  fi
+else
+  echo "[WARN] tools/nmap-sabana-corp no encontrado -- no se genero nmap-sabana-corp.mjs." >&2
+fi

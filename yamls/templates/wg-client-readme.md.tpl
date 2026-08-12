@@ -44,3 +44,25 @@ Solución: `sudo apt install openresolv`. Alternativa sin instalar nada: borra l
 **Que un nombre resuelva no significa que puedas alcanzarlo.** El control de acceso real está en
 el gateway, no en el DNS: vas a poder ver nombres de otros equipos, pero conectarte a ellos es
 exactamente lo que este CTF te reta a lograr.
+
+## 6. Reconocimiento de red: nmap-sabana-corp
+
+En esta misma carpeta viene `nmap-sabana-corp.mjs`: un comando sin privilegios que, con el túnel
+arriba, te dice qué hay vivo en tu alcance y en qué puertos -- calculado en tiempo real, sin listas
+fijas. No necesita instalación ni internet:
+
+```bash
+node nmap-sabana-corp.mjs --scan
+```
+
+Si preferís instalarlo como paquete global (recomendado hacerlo **antes** del evento, el lab no
+tiene salida a internet):
+
+```bash
+npm install -g nmap-sabana-corp
+nmap-sabana-corp --version   # verificacion de pre-flight
+```
+
+Los dos hacen exactamente lo mismo. Ninguno te va a mostrar banners, versiones de servicio, ni
+pistas de los retos -- ver el `README.md` del paquete para el detalle completo de qué muestra y qué
+no.

@@ -186,3 +186,11 @@ en `docs/plans/internal-dns.md` ("El huevo y la gallina").
   Fase 1 (dnsmasq en VM viva sin recreación) completadas, zona sincronizada y round-trip verificado.
   Detalle en `docs/plans/internal-dns.md`. Caveat: contenedores pre-2026-08-10 no tienen `dnsConfig`
   aplicado (requeriría recreación); nuevos deploys lo reciben automáticamente.
+- **`nmap-sabana-corp` (herramienta de reconocimiento para el participante)**: paquete implementado
+  en `tools/nmap-sabana-corp/` (Node ≥18, ESM, cero dependencias), con pruebas unitarias (`node
+  --test`) y bundle de un solo archivo. `generate-wg-client.sh` ya genera `nmap-sabana-corp.mjs`
+  junto a cada `.conf` en `yamls/generated/wg-clients/`. **No probado contra el lab real todavía**:
+  los tres supuestos de Fase 0 del plan (PTR desde un túnel real, comportamiento de puerto cerrado
+  en ACI, presión de conntrack en el gateway) siguen sin verificar, y el `sysctl` de conntrack
+  (Fase 3) no se ha aplicado a `vm-wg-gateway`. Tampoco se ha publicado a npm ni reservado el
+  nombre. Ver `docs/plans/nmap-sabana-corp.md` para el detalle y el plan de pruebas pendiente.
