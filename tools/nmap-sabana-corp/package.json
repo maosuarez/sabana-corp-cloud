@@ -1,7 +1,7 @@
 {
   "name": "nmap-sabana-corp",
-  "version": "0.1.0-draft",
-  "description": "Descubrimiento de red sin privilegios para el CTF de Sabana Corp -- alcance desde el tunel WireGuard, resultados desde TCP connect real, nombres desde el DNS del lab.",
+  "version": "1.0.0",
+  "description": "Unprivileged network discovery for the Sabana Corp CTF -- scope from the WireGuard tunnel, facts from a real TCP connect scan, names from the lab's DNS.",
   "keywords": ["ctf", "network-discovery", "wireguard", "port-scan"],
   "license": "MIT",
   "type": "module",
