@@ -16,7 +16,9 @@ YAML templates from `yamls/`.
 `deploy-wiki-vm`, `deploy-wg-gateway`, `add-team`/`add-team-range`, and the complete VPN flow. 
 When a code comment says "validated 2026-08-08", it refers to that run. CTFd was validated 
 separately on 2026-08-11 (see note below). What is **not** implemented or tested: Provisioner 
-(no image in any repo yet) and `docs/plans/network-segmentation-nsgs.md`, marked as design. 
+(no image in any repo yet). `docs/plans/network-segmentation-nsgs.md` (all 3 steps: team↔team,
+DMZ→teams, everything→mgmt) was implemented and validated end-to-end 2026-08-14, starting from a
+live lateral-movement finding (see below).
 This file updates as design decisions are made.
 
 **CTFd (`docs/plans/ctfd-deployment.md`): F1 implemented on the `../sabana-corp-CTFd` side
@@ -305,13 +307,32 @@ implementation was followed instead of the original description — if they are 
 later, this section must be revisited.
 
 VPN connector: implemented and validated end-to-end 2026-08-08, see `docs/plans/wireguard-vpn-gateway.md`.
-Within the VNet, inter-subnet access remains completely open (Azure routes between VNet subnets by
-default, and zero segmentation NSGs are created on `snet-team*`/`snet-dmz-*`/`snet-mgmt`) — a team
-can reach another team's subnet or `snet-mgmt` without restriction, **if entering outside the VPN
-gateway** (e.g., with direct `az` access). Proposed rules to lock this down at subnet level (teams
-isolated from each other, nobody reaches `snet-mgmt` except staff, DMZ cannot initiate to teams)
-documented in `docs/plans/network-segmentation-nsgs.md` — **not yet implemented**, design only;
-it is a complementary control to the VPN gateway, not a prerequisite.
+
+**Network segmentation (`docs/plans/network-segmentation-nsgs.md`): all 3 steps implemented and
+validated end-to-end 2026-08-14.** Found live: a participant legitimately reached their own
+`team1-linux-server` through the VPN as intended, then pivoted from that box straight into
+`team2-linux-server` — the earlier framing of this risk ("only reachable if entering outside the
+VPN gateway") was wrong; the gateway's `iptables` only controls what a VPN *client* can reach
+directly, it says nothing about what an already-reachable host can reach next once traffic is
+inside the VNet. Before this fix, not a single NSG existed on `snet-team*`/`snet-dmz-*`/`snet-mgmt`
+(only `nsg-wg-gateway`, VPN inbound). Fix, one NSG per subnet (`lab-azure.sh`):
+
+- `nsg-team<N>` (`create_team_nsg`) — allows only that team's own `/24`, denies the rest of
+  `10.60.0.0/16`, both directions (team↔team isolation).
+- `nsg-dmz-shared` / `nsg-dmz-vm` (`create_dmz_shared_nsg` / `create_dmz_vm_nsg`) — deny outbound
+  to the team supernet and to `snet-mgmt`; DMZ-shared↔DMZ-vm and inbound (teams/mgmt reaching DMZ)
+  stay open.
+- `nsg-mgmt` (`create_mgmt_nsg`) — denies inbound from the team supernet and both DMZ prefixes,
+  enforced once on mgmt's own NSG rather than duplicated on every other subnet. `mgmt →
+  everything` (monitoring scrapes) stays open, unaffected since it's stateful return traffic /
+  outbound from mgmt's side.
+
+Wired into `create_vnet()`/`add_team_subnet` so every new subnet gets its NSG automatically;
+`./lab-azure.sh secure-network` retrofits infrastructure created before this fix (`secure-teams`
+still works standalone for teams only). Verified live end-to-end: every cross-boundary path the
+matrix denies (team↔team, DMZ→teams, DMZ→mgmt, team→mgmt) drops; every path it allows (intra-team,
+team→DMZ, DMZ↔DMZ, mgmt→teams/DMZ) stays open. See `docs/plans/network-segmentation-nsgs.md` for
+the full matrix and verification detail.
 
 ## File notes
 

@@ -2,7 +2,51 @@
 
 ## Status
 
-Not implemented. Design/documentation only for now — the explicit request was "let's document that", not apply it yet. See `CLAUDE.md` ("Target network architecture") for current state (complete freedom, not a single NSG created on the lab's subnets; the only NSG today, `nsg-jumpbox`, is ad hoc for SSH from a test jumpbox and doesn't express any real segmentation policy).
+**Step 1 of the rollout order (team↔team isolation) implemented and validated end-to-end against
+the real lab (2026-08-14).** Found live: a participant on team1's VPN tunnel reached
+`team1-linux-server` (10.60.1.7) as intended, then from that box SSHed straight into
+`team2-linux-server` (10.60.2.7) — full lateral movement across teams, because nothing at the
+Azure network layer enforced the matrix below once traffic was already inside the VNet (the
+gateway's `iptables` in `docs/plans/wireguard-vpn-gateway.md` only controls what a *VPN client*
+can reach directly, not what an already-reachable VM/container can reach from there).
+
+Fix: `lab-azure.sh` now creates one NSG per team (`nsg-team<N>`, `create_team_nsg`), attached to
+`snet-team<N>`, allowing only that team's own `/24` and denying the rest of `TEAM_SUPERNET_CIDR`
+(`10.60.0.0/16`) — both inbound and outbound. Wired into `add_team_subnet` so every future
+`add-team`/`add-team-range` gets it automatically; `./lab-azure.sh secure-teams` retrofits teams
+created before this fix (used once for team1/2/3, the three live at the time). Verified live via
+`az container exec` and direct SSH: team1↔team2, team1↔team3 and team2↔team3 all now drop (silent
+NSG deny, TCP connect times out — not an immediate refuse), while intra-team traffic (webapp↔db)
+and team→DMZ (the actual challenge path) are untouched.
+
+**Steps 2 (DMZ → teams denied) and 3 (everything → `snet-mgmt` denied) implemented and validated
+end-to-end against the real lab (2026-08-14), same session as step 1.** `create_dmz_shared_nsg` /
+`create_dmz_vm_nsg` (`nsg-dmz-shared`, `nsg-dmz-vm`) deny outbound from either DMZ subnet to
+`TEAM_SUPERNET_CIDR` and to `MGMT_CIDR` — DMZ-shared↔DMZ-vm traffic is untouched since neither
+prefix is denied, and inbound is left at Azure's default (fully open) since teams and mgmt both
+need to reach DMZ. `create_mgmt_nsg` (`nsg-mgmt`) denies inbound to `snet-mgmt` from
+`TEAM_SUPERNET_CIDR` and from both DMZ prefixes, in a single rule set on mgmt's own NSG rather
+than duplicating an outbound-deny on every team/DMZ NSG — a subnet added later is protected
+automatically. Outbound from `snet-mgmt` is untouched (`mgmt → everything` stays allowed).
+
+Wired into `create_vnet()` (dmz-shared/dmz-vm/mgmt subnets get their NSG at creation time, same as
+teams get theirs in `add_team_subnet`); `./lab-azure.sh secure-network` retrofits every subnet
+that already existed (teams + DMZ + mgmt in one idempotent pass — supersedes `secure-teams` for a
+full retrofit, which still works standalone for teams only).
+
+Verified live (`az container exec` with `nc`, `az vm run-command invoke` for the VMs):
+`dmz-filesrv → team1-linux-server:22` and `dmz-filesrv → vm-monitor:3000` both drop; `vm-wiki
+(dmz-vm) → team1:22` and `vm-wiki → vm-monitor:3000` both drop; `dmz-filesrv ↔ vm-wiki` (DMZ↔DMZ)
+stays open; `team1 → vm-monitor:3000` drops; `team1 → DMZ filesrv:8080` and `vm-monitor → team1
+webapp / dmz-filesrv / vm-wiki` (monitoring scrapes) all stay open. The full matrix in "Proposed
+rule matrix" below is now implemented exactly as specified.
+
+The DNS exception noted in that section never applied: `10.10.0.4` (the gateway/dnsmasq) is
+outside `TEAM_SUPERNET_CIDR` and both DMZ prefixes, so none of these deny rules ever touch it.
+
+See `CLAUDE.md` ("Target network architecture") for the broader picture: before this work, not a
+single NSG existed on the lab's subnets other than `nsg-wg-gateway` (VPN inbound only) — team,
+DMZ and mgmt subnets had complete default Azure intra-VNet routing between them.
 
 ## Problem
 
@@ -58,5 +102,5 @@ If this plan's NSGs are ever applied, **`snet-team*` and `snet-dmz-*` must be ab
 
 ## Open / not decided
 
-- ~~Policy for `snet-wg-gateway`~~ — **resolved, not via NSG.** VPN client access control is implemented on the gateway itself (`vm-wg-gateway`): `iptables FORWARD` rules by WireGuard tunnel IP, with `DROP` policy by default — not in a subnet NSG. Reason: this matrix is per-subnet grain, and VPN control needs to be per-peer (two teams share the `snet-team<N>` "class" but need mutually exclusive access, which a subnet NSG can't express without completely duplicating `add-team`'s lifecycle). See `docs/plans/wireguard-vpn-gateway.md` for the full design. The rest of this matrix (team↔team, DMZ→teams, everything→mgmt) remains unimplemented and still applies as-is to traffic *within* the VNet that doesn't go through the gateway.
+- ~~Policy for `snet-wg-gateway`~~ — **resolved, not via NSG.** VPN client access control is implemented on the gateway itself (`vm-wg-gateway`): `iptables FORWARD` rules by WireGuard tunnel IP, with `DROP` policy by default — not in a subnet NSG. Reason: this matrix is per-subnet grain, and VPN control needs to be per-peer (two teams share the `snet-team<N>` "class" but need mutually exclusive access, which a subnet NSG can't express without completely duplicating `add-team`'s lifecycle). See `docs/plans/wireguard-vpn-gateway.md` for the full design. The rest of this matrix (team↔team, DMZ→teams, everything→mgmt) is now implemented (see "Status" above) and applies to traffic *within* the VNet that doesn't go through the gateway, same as it always did.
 - If Monitor/Provisioner end up living in `snet-mgmt` needing to expose a port to teams (e.g., Provisioner answering a webhook), the rule "`snet-mgmt → everything` yes, nobody → `snet-mgmt`" would need a point exception — don't block that case preventively without knowing it applies.

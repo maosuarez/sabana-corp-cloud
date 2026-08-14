@@ -56,6 +56,15 @@
 #                                # pushes it -- repair command / pre-event check
 #   ./lab-azure.sh dns-check <fqdn>  # resolves <fqdn> from gateway and compares with real IP
 #                                # from Azure
+#   ./lab-azure.sh secure-teams  # retrofits nsg-teamN onto every snet-teamN already deployed
+#                                # (team<->team isolation, step 1 of
+#                                # docs/plans/network-segmentation-nsgs.md) -- new teams get it
+#                                # automatically via add-team, this is only for teams created
+#                                # before this fix
+#   ./lab-azure.sh secure-network # full retrofit of all 3 steps of
+#                                # docs/plans/network-segmentation-nsgs.md (teams + DMZ + mgmt) --
+#                                # new subnets get their NSG automatically going forward, this is
+#                                # only for infrastructure created before this fix. Idempotent.
 #   ./lab-azure.sh test [N]      # shortcut: up + deploy-dmz + add-team N (N=1 if omitted) -- entire
 #                                # lab at once for quick testing (no VPN gateway
 #                                # on purpose, see note in deploy_wg_gateway())
@@ -85,6 +94,16 @@ LAB_DOMAIN="${LAB_DOMAIN:-sabanacorp.internal}"
 WG_GW_PRIVATE_IP="10.10.0.4"
 WG_GW_TUNNEL_IP="10.200.0.1"
 DNS_DIR="${YAMLS_DIR}/generated/dns"
+
+# Network segmentation (docs/plans/network-segmentation-nsgs.md). Every snet-teamN lives inside
+# TEAM_SUPERNET_CIDR -- used to deny team<->team traffic while leaving DMZ, mgmt and the gateway
+# (all outside this range) untouched by the deny rule. DMZ_SHARED/DMZ_VM/MGMT_CIDR are the fixed
+# prefixes from create_vnet(), used the same way for steps 2 (DMZ->teams denied) and 3
+# (everything->mgmt denied).
+TEAM_SUPERNET_CIDR="10.60.0.0/16"
+DMZ_SHARED_CIDR="10.50.0.0/24"
+DMZ_VM_CIDR="10.51.0.0/24"
+MGMT_CIDR="10.99.0.0/24"
 
 # ---------------------------------------------------------------------------
 # Helper functions
@@ -164,19 +183,87 @@ create_vnet() {
     --output none
 
   az network vnet subnet create --resource-group "$RG" --vnet-name "$VNET" \
-    --name snet-dmz-shared --address-prefixes 10.50.0.0/24 --output none
+    --name snet-dmz-shared --address-prefixes "$DMZ_SHARED_CIDR" --output none
+  create_dmz_shared_nsg
 
   az network vnet subnet create --resource-group "$RG" --vnet-name "$VNET" \
-    --name snet-mgmt --address-prefixes 10.99.0.0/24 --output none
+    --name snet-mgmt --address-prefixes "$MGMT_CIDR" --output none
+  create_mgmt_nsg
 
   # Parallel DMZ for services that don't run in ACI (see docs/plans/wiki-on-vm.md): unlike
   # snet-dmz-shared, this is NOT delegated to ACI, so it supports VMs. Here lives vm-wiki
   # (wiki + wiki-db with docker-compose), deployed by './lab-azure.sh deploy-wiki-vm' and
   # validated end-to-end 2026-08-08.
   az network vnet subnet create --resource-group "$RG" --vnet-name "$VNET" \
-    --name snet-dmz-vm --address-prefixes 10.51.0.0/24 --output none
+    --name snet-dmz-vm --address-prefixes "$DMZ_VM_CIDR" --output none
+  create_dmz_vm_nsg
 
   echo "Base subnets created (snet-team<N> created with 'add-team <N>')."
+}
+
+# create_dmz_shared_nsg / create_dmz_vm_nsg -- step 2 of docs/plans/network-segmentation-nsgs.md.
+# DMZ is intentional attack surface (filesrv/wiki/parking/decoys are meant to be exploited); it
+# must not become a pivot beyond the challenge, so it can only initiate towards the other DMZ
+# subnet (untouched by these rules, since neither prefix below covers 10.50/10.51) -- never
+# towards a team or mgmt. Inbound is deliberately left at Azure's default (fully open): teams and
+# mgmt both need to reach DMZ (the actual challenge path, and monitoring probes).
+create_dmz_shared_nsg() {
+  local nsg="nsg-dmz-shared"
+  echo "== NSG '${nsg}': deny outbound to teams/mgmt (DMZ can't pivot beyond itself) =="
+  az network nsg create --resource-group "$RG" --name "$nsg" --location "$LOCATION" --output none
+  az network nsg rule create --resource-group "$RG" --nsg-name "$nsg" \
+    --name deny-teams-outbound --priority 100 --direction Outbound --access Deny --protocol '*' \
+    --source-address-prefixes "$DMZ_SHARED_CIDR" --source-port-ranges '*' \
+    --destination-address-prefixes "$TEAM_SUPERNET_CIDR" --destination-port-ranges '*' --output none
+  az network nsg rule create --resource-group "$RG" --nsg-name "$nsg" \
+    --name deny-mgmt-outbound --priority 200 --direction Outbound --access Deny --protocol '*' \
+    --source-address-prefixes "$DMZ_SHARED_CIDR" --source-port-ranges '*' \
+    --destination-address-prefixes "$MGMT_CIDR" --destination-port-ranges '*' --output none
+  az network vnet subnet update --resource-group "$RG" --vnet-name "$VNET" \
+    --name snet-dmz-shared --network-security-group "$nsg" --output none
+  echo "${nsg} attached to snet-dmz-shared."
+}
+
+create_dmz_vm_nsg() {
+  local nsg="nsg-dmz-vm"
+  echo "== NSG '${nsg}': deny outbound to teams/mgmt (DMZ can't pivot beyond itself) =="
+  az network nsg create --resource-group "$RG" --name "$nsg" --location "$LOCATION" --output none
+  az network nsg rule create --resource-group "$RG" --nsg-name "$nsg" \
+    --name deny-teams-outbound --priority 100 --direction Outbound --access Deny --protocol '*' \
+    --source-address-prefixes "$DMZ_VM_CIDR" --source-port-ranges '*' \
+    --destination-address-prefixes "$TEAM_SUPERNET_CIDR" --destination-port-ranges '*' --output none
+  az network nsg rule create --resource-group "$RG" --nsg-name "$nsg" \
+    --name deny-mgmt-outbound --priority 200 --direction Outbound --access Deny --protocol '*' \
+    --source-address-prefixes "$DMZ_VM_CIDR" --source-port-ranges '*' \
+    --destination-address-prefixes "$MGMT_CIDR" --destination-port-ranges '*' --output none
+  az network vnet subnet update --resource-group "$RG" --vnet-name "$VNET" \
+    --name snet-dmz-vm --network-security-group "$nsg" --output none
+  echo "${nsg} attached to snet-dmz-vm."
+}
+
+# create_mgmt_nsg -- step 3 of docs/plans/network-segmentation-nsgs.md. snet-mgmt is the staff
+# plane (CTFd/Provisioner/Monitor); nobody (team or DMZ) should be able to initiate a connection
+# into it. Single point of enforcement, on mgmt's own inbound, instead of duplicating an
+# outbound-deny-to-mgmt rule on every team/DMZ NSG -- a subnet added later is protected
+# automatically without needing to remember to touch its own NSG too. Outbound stays at Azure's
+# default (fully open): mgmt->everything is allowed (monitoring/admin need broad reach), and
+# WireGuard admin-tunnel traffic (source 10.200.0.2, outside both denied ranges) keeps reaching
+# Grafana untouched, same as before this rule existed.
+create_mgmt_nsg() {
+  local nsg="nsg-mgmt"
+  echo "== NSG '${nsg}': deny inbound from teams/DMZ (isolated staff plane) =="
+  az network nsg create --resource-group "$RG" --name "$nsg" --location "$LOCATION" --output none
+  az network nsg rule create --resource-group "$RG" --nsg-name "$nsg" \
+    --name deny-teams-inbound --priority 100 --direction Inbound --access Deny --protocol '*' \
+    --source-address-prefixes "$TEAM_SUPERNET_CIDR" --source-port-ranges '*' \
+    --destination-address-prefixes "$MGMT_CIDR" --destination-port-ranges '*' --output none
+  az network nsg rule create --resource-group "$RG" --nsg-name "$nsg" \
+    --name deny-dmz-inbound --priority 200 --direction Inbound --access Deny --protocol '*' \
+    --source-address-prefixes "$DMZ_SHARED_CIDR" "$DMZ_VM_CIDR" --source-port-ranges '*' \
+    --destination-address-prefixes "$MGMT_CIDR" --destination-port-ranges '*' --output none
+  az network vnet subnet update --resource-group "$RG" --vnet-name "$VNET" \
+    --name snet-mgmt --network-security-group "$nsg" --output none
+  echo "${nsg} attached to snet-mgmt."
 }
 
 register_aci_provider() {
@@ -263,7 +350,86 @@ add_team_subnet() {
     --name "snet-team${team}" --address-prefixes "$prefix" --output none
   az network vnet subnet update --resource-group "$RG" --vnet-name "$VNET" \
     --name "snet-team${team}" --delegations Microsoft.ContainerInstance/containerGroups --output none
+  create_team_nsg "$team"
   echo "snet-team${team} created and delegated."
+}
+
+# create_team_nsg <N> -- one NSG per team (docs/plans/network-segmentation-nsgs.md), attached
+# directly to snet-teamN (Azure allows this on ACI-delegated subnets). Allows the team's own
+# /24 (intra-team traffic: database<->webapp<->xss-bot<->linux-server) at a lower priority
+# number (evaluated first), then denies the rest of TEAM_SUPERNET_CIDR -- so another team's /24
+# is blocked but DMZ/mgmt/gateway (outside that /16) fall through to the untouched
+# AllowVnetOutBound/AllowVnetInBound default rules. `az network nsg create`/`nsg rule create` are
+# idempotent PUT operations -- safe to re-run against an already-secured team.
+create_team_nsg() {
+  local team="$1"
+  local own_prefix="10.60.${team}.0/24"
+  local nsg="nsg-team${team}"
+
+  echo "== NSG '${nsg}': allow own subnet, deny rest of ${TEAM_SUPERNET_CIDR} (team isolation) =="
+  az network nsg create --resource-group "$RG" --name "$nsg" --location "$LOCATION" --output none
+
+  az network nsg rule create --resource-group "$RG" --nsg-name "$nsg" \
+    --name allow-own-team-outbound --priority 100 --direction Outbound --access Allow --protocol '*' \
+    --source-address-prefixes "$own_prefix" --source-port-ranges '*' \
+    --destination-address-prefixes "$own_prefix" --destination-port-ranges '*' --output none
+  az network nsg rule create --resource-group "$RG" --nsg-name "$nsg" \
+    --name deny-other-teams-outbound --priority 200 --direction Outbound --access Deny --protocol '*' \
+    --source-address-prefixes "$own_prefix" --source-port-ranges '*' \
+    --destination-address-prefixes "$TEAM_SUPERNET_CIDR" --destination-port-ranges '*' --output none
+
+  az network nsg rule create --resource-group "$RG" --nsg-name "$nsg" \
+    --name allow-own-team-inbound --priority 100 --direction Inbound --access Allow --protocol '*' \
+    --source-address-prefixes "$own_prefix" --source-port-ranges '*' \
+    --destination-address-prefixes "$own_prefix" --destination-port-ranges '*' --output none
+  az network nsg rule create --resource-group "$RG" --nsg-name "$nsg" \
+    --name deny-other-teams-inbound --priority 200 --direction Inbound --access Deny --protocol '*' \
+    --source-address-prefixes "$TEAM_SUPERNET_CIDR" --source-port-ranges '*' \
+    --destination-address-prefixes "$own_prefix" --destination-port-ranges '*' --output none
+
+  az network vnet subnet update --resource-group "$RG" --vnet-name "$VNET" \
+    --name "snet-team${team}" --network-security-group "$nsg" --output none
+  echo "${nsg} attached to snet-team${team}."
+}
+
+# secure-teams -- retrofits NSGs onto every snet-teamN that already exists (created before this
+# fix). New teams get create_team_nsg automatically via add_team_subnet; this is the one-shot
+# repair for teams deployed before it existed.
+secure_teams() {
+  local teams
+  teams="$(az network vnet subnet list --resource-group "$RG" --vnet-name "$VNET" \
+    --query "[?starts_with(name,'snet-team')].name" --output tsv | sed 's/^snet-team//')"
+  if [[ -z "$teams" ]]; then
+    echo "No snet-teamN subnets found."
+    return 0
+  fi
+  local team
+  for team in $teams; do
+    create_team_nsg "$team"
+  done
+}
+
+# secure_network -- full retrofit of docs/plans/network-segmentation-nsgs.md (all 3 steps) onto
+# subnets that already exist. New subnets get their NSG automatically (create_vnet for
+# dmz-shared/dmz-vm/mgmt, add_team_subnet for teams); this is only for infrastructure created
+# before this plan existed. Safe to re-run any time -- every create_*_nsg is an idempotent PUT.
+secure_network() {
+  secure_teams
+  if az network vnet subnet show --resource-group "$RG" --vnet-name "$VNET" --name snet-dmz-shared --output none 2>/dev/null; then
+    create_dmz_shared_nsg
+  else
+    echo "snet-dmz-shared doesn't exist yet, skipping."
+  fi
+  if az network vnet subnet show --resource-group "$RG" --vnet-name "$VNET" --name snet-dmz-vm --output none 2>/dev/null; then
+    create_dmz_vm_nsg
+  else
+    echo "snet-dmz-vm doesn't exist yet, skipping."
+  fi
+  if az network vnet subnet show --resource-group "$RG" --vnet-name "$VNET" --name snet-mgmt --output none 2>/dev/null; then
+    create_mgmt_nsg
+  else
+    echo "snet-mgmt doesn't exist yet, skipping."
+  fi
 }
 
 validate_team_num() {
@@ -1229,11 +1395,13 @@ case "${1:-}" in
     shift
     dns_check "${1:-}"
     ;;
+  secure-teams)      secure_teams ;;
+  secure-network)    secure_network ;;
   test)              shift; test_deploy "${1:-1}" ;;
   status)            status ;;
   down)              down ;;
   *)
-    echo "Usage: $0 {up|deploy-dmz|add-team <N>|add-team-range <start> <end> [concurrency]|deploy-wiki-vm|deploy-ctfd-vm|deploy-monitor-vm|deploy-wg-gateway|wg-team-peer <N>|dns-sync [--from-azure]|dns-check <fqdn>|test [N]|status|down}"
+    echo "Usage: $0 {up|deploy-dmz|add-team <N>|add-team-range <start> <end> [concurrency]|deploy-wiki-vm|deploy-ctfd-vm|deploy-monitor-vm|deploy-wg-gateway|wg-team-peer <N>|dns-sync [--from-azure]|dns-check <fqdn>|secure-teams|secure-network|test [N]|status|down}"
     exit 1
     ;;
 esac
