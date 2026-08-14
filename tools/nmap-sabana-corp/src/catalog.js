@@ -2,7 +2,7 @@
 // and the port catalog. The rest of the package knows nothing about this particular lab.
 // See docs/plans/nmap-sabana-corp.md ("How scope is determined", "Port catalog").
 
-export const VERSION = '0.1.0-draft'
+export const VERSION = '1.0.1'
 
 export const TUNNEL_OVERLAY_CIDR = '10.200.0.0/16'
 export const RESOLVER_IP = '10.200.0.1'
