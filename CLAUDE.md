@@ -74,11 +74,15 @@ passes (36 unit tests, no real infrastructure). `generate-wg-client.sh` generate
 `nmap-sabana-corp.mjs` (single-file bundle, via `tools/nmap-sabana-corp/scripts/build-bundle.mjs`,
 no external bundler) alongside each `.conf` in `yamls/generated/wg-clients/`, and the participant
 README (`yamls/templates/wg-client-readme.md.tpl`) already documents it. Publication workflow
-(`.github/workflows/nmap-sabana-corp.yml`, tag `nmap-v*`) written but never run — missing
-`NPM_TOKEN` in secrets and npm package name reservation. **Pending, explicitly outside this
-implementation**: the three Phase 0 assumptions in the plan (PTR from a real tunnel, closed-port
-behavior in ACI, conntrack pressure on the gateway with N teams), the `sysctl` conntrack tuning
-on `vm-wg-gateway` (Phase 3), and actual npm publication. Do not touch `yamls/wg-gateway/cloud-init.yaml`
+(`.github/workflows/nmap-sabana-corp.yml`, tag `nmap-v*`) **has run and published successfully**:
+`NPM_TOKEN` was already configured and the package name already reserved (contrary to an earlier,
+stale version of this note) — `nmap-v0.1.0-draft` published 2026-08-12, `nmap-v1.0.0` published
+2026-08-14, both live on the public npm registry as `nmap-sabana-corp`. Tagging `1.0.0` happened
+before Phase 0 validation below was run — a version-number/reality mismatch, not a blocker; treat
+Phase 0 as still outstanding regardless of what the version number says. **Pending, explicitly
+outside this implementation**: the three Phase 0 assumptions in the plan (PTR from a real tunnel,
+closed-port behavior in ACI, conntrack pressure on the gateway with N teams), and the `sysctl`
+conntrack tuning on `vm-wg-gateway` (Phase 3). Do not touch `yamls/wg-gateway/cloud-init.yaml`
 or the live gateway without re-reading "What breaks first" in the plan first — that is the
 real design risk.
 
