@@ -1,14 +1,14 @@
-// "Cómo se escanea": TCP connect scan real (net.Socket, sin sockets raw, sin root), dos fases.
-// Fase A descubre hosts vivos con un puñado de puertos y cancela el resto en cuanto uno responde.
-// Fase B mide el catalogo completo, solo contra los hosts vivos. Ver docs/plans/nmap-sabana-corp.md.
+// "How scanning works": real TCP connect scan (net.Socket, no raw sockets, no root), two phases.
+// Phase A discovers live hosts with a handful of ports and cancels the rest as soon as one responds.
+// Phase B measures the complete catalog, only against live hosts. See docs/plans/nmap-sabana-corp.md.
 
 import net from 'node:net'
 import { CATALOG_PORTS, PHASE_A_PORTS } from './catalog.js'
 import { hostsInCidr } from './scope.js'
 
 export const DEFAULT_CONCURRENCY = 128
-// Empiricamente, ~5-8s de barrido total para 3 x /24 vienen de un timeout corto por intento --
-// la mayoria de direcciones del rango estan vacias y el costo lo domina ese timeout, no la red.
+// Empirically, ~5-8s of total scan for 3 x /24 comes from a short timeout per attempt --
+// most addresses in the range are empty and that timeout dominates the cost, not the network.
 export const DEFAULT_TIMEOUT_MS = 300
 
 function connectPort(ip, port, timeoutMs) {
@@ -29,7 +29,7 @@ function connectPort(ip, port, timeoutMs) {
   })
 }
 
-// Ejecuta `worker` sobre `items` con a lo sumo `concurrency` tareas en vuelo a la vez.
+// Runs `worker` on `items` with at most `concurrency` tasks in flight at once.
 export async function runPool(items, worker, concurrency) {
   const results = new Array(items.length)
   let cursor = 0
@@ -44,9 +44,9 @@ export async function runPool(items, worker, concurrency) {
   return results
 }
 
-// "Un host esta vivo si al menos un puerto del catalogo responde (aceptado o rechazado
-// explicitamente)". Recorre los puertos de Fase A en orden y se detiene en el primero que no de
-// timeout -- esa es la cancelacion por host.
+// "A host is alive if at least one port from the catalog responds (accepted or explicitly
+// rejected)". Iterates through Phase A ports in order and stops at the first one that doesn't
+// timeout -- that's the per-host cancellation.
 async function probeHostAlive(ip, ports, timeoutMs) {
   for (const port of ports) {
     const status = await connectPort(ip, port, timeoutMs)
@@ -61,8 +61,8 @@ export async function scan({
   phaseAPorts = PHASE_A_PORTS,
   concurrency = DEFAULT_CONCURRENCY,
   timeoutMs = DEFAULT_TIMEOUT_MS,
-  // Nombre distinto al de la funcion importada (`hostsInCidr`) a proposito: un parametro con el
-  // mismo nombre no puede referenciar el binding externo en su propio valor por defecto.
+  // Different name from the imported function (`hostsInCidr`) on purpose: a parameter with the
+  // same name cannot reference the external binding in its own default value.
   hostsInCidr: hostsInCidrFn = hostsInCidr
 }) {
   const start = Date.now()

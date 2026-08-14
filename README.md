@@ -1,6 +1,6 @@
 # Sabana Corp: Isolated Azure CTF/Cyber-Range Infrastructure
 
-Spin up a complete, isolated CTF/cyber-range lab in Azure with a handful of bash commands. Fully automated deployment of isolated network, competition infrastructure, VPN gateway, DNS, monitoring, and CTF platform — used in production for **Sabana Corp**, the Capture The Flag competition at Universidad de la Sabana's Semana de Ingeniería.
+Spin up a complete, isolated CTF/cyber-range lab in Azure with a handful of bash commands. Fully automated deployment of isolated network, competition infrastructure, VPN gateway, DNS, monitoring, and CTF platform — used in production for **Sabana Corp**, the Capture The Flag competition at Universidad de la Sabana's Engineering Week.
 
 All services run in **Azure Container Instances** (ACI) or VMs within a private VNet with no internet egress. Access only via WireGuard VPN behind a captive portal, per-team isolated tunnels with custom firewall rules, internal DNS for reconnaissance, and real-time observability dashboard for event staff.
 

@@ -1,46 +1,46 @@
 #!/usr/bin/env bash
 #
-# generate-team.sh — genera los 4 YAML de ACI de un equipo a partir de yamls/templates/team-*.yaml.tpl
+# generate-team.sh — generates 4 ACI YAMLs for a team from yamls/templates/team-*.yaml.tpl
 #
-# Uso:
+# Usage:
 #   export DOCKERHUB_USER="..."
 #   export DOCKERHUB_TOKEN="..."
-#   cp .env.secrets.example .env.secrets   # solo la primera vez, y editar valores reales
+#   cp .env.secrets.example .env.secrets   # only the first time, and edit actual values
 #   ./generate-team.sh <N>
 #
-# Escribe yamls/generated/team<N>-{database,webapp,linux-server,xss-bot}.yaml
+# Writes yamls/generated/team<N>-{database,webapp,linux-server,xss-bot}.yaml
 #
-# Los secretos/flags (FLAG_*, PIVOT_SSH_PASSWORD, BOT_SECRET, MYSQL_ROOT_PASSWORD,
-# DB_APP_PASSWORD, JWT_SIGNING_SECRET) se leen de yamls/.env.secrets y son los MISMOS para todos
-# los equipos -- generate-team.sh 1 y generate-team.sh 2 producen el mismo valor de flag, solo
-# cambia el nombre del container group y la subred. Asi el mismo set de flags que cargas una vez
-# en CTFd sirve para cualquier equipo.
+# Secrets/flags (FLAG_*, PIVOT_SSH_PASSWORD, BOT_SECRET, MYSQL_ROOT_PASSWORD,
+# DB_APP_PASSWORD, JWT_SIGNING_SECRET) are read from yamls/.env.secrets and are the SAME for all
+# teams -- generate-team.sh 1 and generate-team.sh 2 produce the same flag value, only
+# the container group name and subnet change. So the same set of flags that you load once
+# in CTFd serves for any team.
 #
-# <DATABASE_IP> y <WEBAPP_IP> quedan sin resolver a proposito: dependen de la IP que Azure asigne
-# al desplegar database/webapp, y eso no se sabe hasta despues del deploy. Ver yamls/README.md.
-# Esto NO cambia con el DNS interno (ver docs/plans/internal-dns.md): las env vars de los retos
-# se quedan en IP a proposito, el DNS es solo para nombres humanos/navegacion.
+# <DATABASE_IP> and <WEBAPP_IP> are deliberately left unresolved: they depend on the IP that Azure assigns
+# when deploying database/webapp, and that is not known until after the deploy. See yamls/README.md.
+# This does NOT change with internal DNS (see docs/plans/internal-dns.md): challenge env vars
+# stay on IP deliberately, DNS is only for human names/navigation.
 #
-# Requiere que exista la subred snet-team<N> (10.60.<N>.0/24) delegada a
-# Microsoft.ContainerInstance/containerGroups -- este script no la crea.
+# Requires that subnet snet-team<N> (10.60.<N>.0/24) delegated to
+# Microsoft.ContainerInstance/containerGroups already exists -- this script does not create it.
 
 set -euo pipefail
 
-TEAM="${1:?Uso: $0 <numero_de_equipo>}"
+TEAM="${1:?Usage: $0 <team_number>}"
 
 case "$TEAM" in
-  ''|*[!0-9]*) echo "[ERROR] <numero_de_equipo> debe ser un entero (ej. 1, 2, 20)."; exit 1 ;;
+  ''|*[!0-9]*) echo "[ERROR] <team_number> must be an integer (e.g. 1, 2, 20)."; exit 1 ;;
 esac
 
 RESOURCE_GROUP="${RESOURCE_GROUP:-rg-ctf-semana-ingenieria-test}"
 VNET="${VNET:-vnet-ctf-lab}"
 LAB_DOMAIN="${LAB_DOMAIN:-sabanacorp.internal}"
 LAB_DNS_SERVER="${LAB_DNS_SERVER:-}"
-: "${DOCKERHUB_USER:?Falta exportar DOCKERHUB_USER}"
-: "${DOCKERHUB_TOKEN:?Falta exportar DOCKERHUB_TOKEN}"
+: "${DOCKERHUB_USER:?Missing exported DOCKERHUB_USER}"
+: "${DOCKERHUB_TOKEN:?Missing exported DOCKERHUB_TOKEN}"
 SUBSCRIPTION_ID="${SUBSCRIPTION_ID:-$(az account show --query id --output tsv)}"
 
-command -v envsubst >/dev/null 2>&1 || { echo "[ERROR] falta 'envsubst' (paquete gettext-base)."; exit 1; }
+command -v envsubst >/dev/null 2>&1 || { echo "[ERROR] missing 'envsubst' (package gettext-base)."; exit 1; }
 
 WORKDIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
 TEMPLATES="${WORKDIR}/templates"
@@ -48,7 +48,7 @@ OUTDIR="${WORKDIR}/generated"
 SECRETS_FILE="${WORKDIR}/.env.secrets"
 mkdir -p "$OUTDIR"
 
-[[ -f "$SECRETS_FILE" ]] || { echo "[ERROR] falta ${SECRETS_FILE} (copia .env.secrets.example y rellena valores reales)."; exit 1; }
+[[ -f "$SECRETS_FILE" ]] || { echo "[ERROR] missing ${SECRETS_FILE} (copy .env.secrets.example and fill in actual values)."; exit 1; }
 
 SECRET_VARS=(FLAG_WEBAPP_XSS FLAG_WEBAPP_LFI FLAG_DATABASE FLAG_LINUXSERVER_ROOT FLAG_LINUXSERVER_PROC \
              PIVOT_SSH_PASSWORD BOT_SECRET MYSQL_ROOT_PASSWORD DB_APP_PASSWORD JWT_SIGNING_SECRET)
@@ -59,12 +59,12 @@ source "$SECRETS_FILE"
 set +a
 
 for v in "${SECRET_VARS[@]}"; do
-  [[ -n "${!v:-}" ]] || { echo "[ERROR] falta ${v} en ${SECRETS_FILE}."; exit 1; }
+  [[ -n "${!v:-}" ]] || { echo "[ERROR] missing ${v} in ${SECRETS_FILE}."; exit 1; }
 done
 
 export TEAM RESOURCE_GROUP VNET DOCKERHUB_USER DOCKERHUB_TOKEN SUBSCRIPTION_ID LAB_DOMAIN LAB_DNS_SERVER
-# Lista explicita: envsubst solo reemplaza estas variables y deja intactos otros ${...}/<...>
-# (p.ej. <DATABASE_IP>, que no usa sintaxis ${} y nunca corre riesgo de ser tocado).
+# Explicit list: envsubst only replaces these variables and leaves other ${...}/<...> untouched
+# (e.g. <DATABASE_IP>, which does not use ${} syntax and is never at risk of being touched).
 VARS='${TEAM} ${RESOURCE_GROUP} ${VNET} ${DOCKERHUB_USER} ${DOCKERHUB_TOKEN} ${SUBSCRIPTION_ID} ${LAB_DOMAIN} ${LAB_DNS_SERVER}'
 for v in "${SECRET_VARS[@]}"; do
   VARS="${VARS} \${${v}}"
@@ -74,15 +74,15 @@ for svc in database webapp linux-server xss-bot; do
   in="${TEMPLATES}/team-${svc}.yaml.tpl"
   out="${OUTDIR}/team${TEAM}-${svc}.yaml"
   envsubst "$VARS" < "$in" > "$out"
-  # LAB_DNS_SERVER vacio == lab sin gateway (./lab-azure.sh test, o gateway no desplegado
-  # todavia): envsubst no sabe de condicionales, asi que el bloque con centinelas
-  # DNSCONFIG-BEGIN/END es la forma mas simple de dejar el YAML sin dnsConfig en ese caso.
+  # LAB_DNS_SERVER empty == lab without gateway (./lab-azure.sh test, or gateway not deployed
+  # yet): envsubst does not know conditionals, so the block with DNSCONFIG-BEGIN/END sentinels
+  # is the simplest way to leave the YAML without dnsConfig in that case.
   if [[ -z "$LAB_DNS_SERVER" ]]; then
     sed -i '/DNSCONFIG-BEGIN/,/DNSCONFIG-END/d' "$out"
   fi
-  echo "generado: $out"
+  echo "generated: $out"
 done
 
 echo
-echo "Pendiente manual: rellenar <DATABASE_IP> en team${TEAM}-webapp.yaml y <WEBAPP_IP> en"
-echo "team${TEAM}-xss-bot.yaml despues de desplegar database/webapp (ver yamls/README.md)."
+echo "Manual pending: fill in <DATABASE_IP> in team${TEAM}-webapp.yaml and <WEBAPP_IP> in"
+echo "team${TEAM}-xss-bot.yaml after deploying database/webapp (see yamls/README.md)."

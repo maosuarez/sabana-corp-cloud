@@ -1,7 +1,7 @@
-# ACI container group: decoy-monitor (compartido, snet-dmz-shared 10.50.0.0/24)
-# Perfil "monitor": HTTP 3000 (Grafana falso) + HTTP 9090 (Prometheus falso, 403).
-# No confundir con el Monitor real (Prometheus+Grafana para staff) mencionado en la arquitectura --
-# este es un decoy, no el servicio de monitoreo real.
+# ACI container group: decoy-monitor (shared, snet-dmz-shared 10.50.0.0/24)
+# Profile "monitor": HTTP 3000 (fake Grafana) + HTTP 9090 (fake Prometheus, 403).
+# Do not confuse with the real Monitor (Prometheus+Grafana for staff) mentioned in the architecture --
+# this is a decoy, not the real monitoring service.
 apiVersion: 2021-07-01
 location: eastus2
 name: dmz-decoy-monitor
@@ -19,9 +19,9 @@ properties:
         resources: {requests: {cpu: 0.25, memoryInGB: 0.5}}
         ports: [{port: 3000}, {port: 9090}]
 
-  # DNSCONFIG-BEGIN -- lo elimina el generador si LAB_DNS_SERVER esta vacio (lab sin gateway).
-  # 2o nameserver a proposito: si dnsmasq no responde, el contenedor sigue resolviendo internet
-  # via Azure DNS (ver docs/plans/internal-dns.md).
+  # DNSCONFIG-BEGIN -- removed by generator if LAB_DNS_SERVER is empty (lab without gateway).
+  # 2nd nameserver on purpose: if dnsmasq doesn't respond, container keeps resolving internet
+  # via Azure DNS (see docs/plans/internal-dns.md).
   dnsConfig:
     nameServers:
       - "${LAB_DNS_SERVER}"

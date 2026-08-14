@@ -19,7 +19,7 @@ you propose.
 
 ## Scope
 
-- `docs/plans/*.md` marked "diseño" / "not implemented" are proposals, not documentation of
+- `docs/plans/*.md` marked "design" / "not implemented" are proposals, not documentation of
   running behavior. If you implement one, validate it against real Azure before updating its
   status.
 - Secrets (`yamls/.env.secrets`) are never committed. If your change adds a new secret, add the

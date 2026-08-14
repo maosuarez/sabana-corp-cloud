@@ -1,46 +1,46 @@
 #!/usr/bin/env python3
 """
-gen_targets.py -- corre en vm-monitor via systemd timer (gen-targets.timer, cada 60s).
+gen_targets.py -- runs on vm-monitor via systemd timer (gen-targets.timer, every 60s).
 
-Ver docs/plans/observability-monitoring.md "Decision de diseño: descubrimiento via
-'az container list', no targets estaticos" y "sondeo externo (blackbox), no agentes".
+See docs/plans/observability-monitoring.md "Design decision: discovery via
+'az container list', not static targets" and "external probing (blackbox), not agents".
 
-CORRECCION respecto al plan original: 'az container list' NO trae 'instanceView' poblado --
-limitacion de la API/CLI ya documentada en lab-azure.sh (print_container_states(), comentario
-sobre 'az container show' por contenedor). Confirmado de nuevo aqui en el primer despliegue real:
-con 'list' el estado y el restartCount siempre llegan vacios. El plan asumia que 'list' bastaba
-para las tres cosas (IP, estado, restarts) -- no es cierto, solo la IP viene poblada por 'list'.
+CORRECTION from the original plan: 'az container list' does NOT return populated 'instanceView' --
+a limitation of the API/CLI already documented in lab-azure.sh (print_container_states(), comment
+about 'az container show' per container). Confirmed again here in the first real deployment:
+with 'list' the state and restartCount always come back empty. The plan assumed 'list' was enough
+for all three things (IP, state, restarts) -- not true, only IP comes populated from 'list'.
 
-Por eso el estado de control plane (señal secundaria "b") se refresca por separado, con
-'az container show' por contenedor, PERO no en cada tick de 60s -- eso si violaria el limite de
-rate del control plane que el plan advierte evitar (93 grupos * 1/min = 93 llamadas/min).
-Se refresca cada STATE_REFRESH_SECONDS (5 min por defecto, ~93 llamadas/5min = bien por debajo de
-cualquier limite de ARM), paralelizado con un pool acotado, y se cachea en disco entre ticks.
+That's why control plane state (secondary signal "b") is refreshed separately, with
+'az container show' per container, BUT not every 60s tick -- that would violate the rate limit
+for control plane that the plan warns to avoid (93 groups * 1/min = 93 calls/min).
+It refreshes every STATE_REFRESH_SECONDS (5 min by default, ~93 calls/5min = well below
+any ARM rate limit), parallelized with a bounded pool, and cached to disk between ticks.
 
-Escribe tres archivos:
+Writes three files:
 
   - /etc/prometheus/targets/aci_targets.json
-      formato file_sd de Prometheus. Cada entrada lleva su IP:puerto real en "targets" (se
-      convierte en __param_target via relabel_configs en prometheus.yml) y los labels
-      group/team/service/probe_module que alimentan el dashboard "Muro de equipos". Se
-      reescribe en CADA tick (barato: una sola 'az container list').
+      Prometheus file_sd format. Each entry carries its real IP:port in "targets" (becomes
+      __param_target via relabel_configs in prometheus.yml) and the
+      group/team/service/probe_module labels that feed the "Team Wall" dashboard. Rewritten
+      on EVERY tick (cheap: just one 'az container list').
 
   - /etc/node_exporter/textfile/sabana_drift.prom
-      sabana_ip_drift (ver "La alerta que no existe en ningun stack estandar" en el plan). Se
-      reescribe en cada tick -- se calcula con datos que 'list' ya trae (IP + environmentVariables
-      no seguros), sin llamadas extra.
+      sabana_ip_drift (see "The alert that doesn't exist in any standard stack" in the plan).
+      Rewritten every tick -- calculated from data that 'list' already brings (IP + environmentVariables
+      not secure), without extra calls.
 
   - /etc/node_exporter/textfile/sabana_state.prom
-      sabana_container_state + sabana_container_restart_count (señal secundaria "b"). Se
-      reescribe en cada tick a partir del CACHE, pero el cache mismo solo se refresca contra
-      Azure cada STATE_REFRESH_SECONDS.
+      sabana_container_state + sabana_container_restart_count (secondary signal "b").
+      Rewritten every tick from the CACHE, but the cache itself only refreshes against
+      Azure every STATE_REFRESH_SECONDS.
 
-Variable de entorno usada: RESOURCE_GROUP (fijada en gen-targets.service).
+Environment variable used: RESOURCE_GROUP (set in gen-targets.service).
 
-Punto ciego conocido y documentado en el plan: 'xss-bot' no tiene sonda propia todavia -- no
-escucha en ningun puerto hasta que bot.js exponga /health (cambio pendiente en el repo
-sabana-corp-network, fuera de alcance de este script). Su estado de control plane (Running/
-restartCount) SI se reporta -- es insuficiente sola (ver la tabla del plan) pero mejor que nada.
+Known and documented blind spot in the plan: 'xss-bot' has no probe yet -- doesn't
+listen on any port until bot.js exposes /health (pending change in the
+sabana-corp-network repo, out of scope for this script). Its control plane state (Running/
+restartCount) IS reported -- insufficient alone (see the plan's table) but better than nothing.
 """
 import json
 import os
@@ -62,9 +62,9 @@ DRIFT_PROM_FILE = os.path.join(TEXTFILE_DIR, "sabana_drift.prom")
 STATE_PROM_FILE = os.path.join(TEXTFILE_DIR, "sabana_state.prom")
 STATE_CACHE_FILE = os.path.join(TEXTFILE_DIR, ".sabana_state_cache.json")
 
-# service (derivado del nombre del container group) -> (puerto, modulo de blackbox.yml)
-# Ausente de este mapa == sin sonda blackbox (solo estado de control plane). Hoy solo aplica a
-# xss-bot -- ver docstring.
+# service (derived from container group name) -> (port, blackbox.yml module)
+# Absent from this map == no blackbox probe (only control plane state). Today only applies to
+# xss-bot -- see docstring.
 SERVICE_PROBES = {
     "database": (3306, "tcp_connect"),
     "webapp": (80, "http_2xx"),
@@ -100,7 +100,7 @@ def az(*args):
 
 
 def classify(name):
-    """nombre del container group -> (group, team, service) o None si no se reconoce."""
+    """container group name -> (group, team, service) or None if not recognized."""
     m = re.match(r"^team(\d+)-(.+)$", name)
     if m:
         return "edificio", m.group(1), m.group(2)
@@ -125,9 +125,9 @@ def atomic_write(path, content):
     fd, tmp = tempfile.mkstemp(dir=d)
     with os.fdopen(fd, "w") as f:
         f.write(content)
-    # mkstemp crea el archivo 0600 (solo root) -- node-exporter/prometheus corren dentro de sus
-    # contenedores con un UID no-root y montan estos directorios read-only, asi que sin este
-    # chmod no pueden leer nada de lo que este script escribe.
+    # mkstemp creates the file 0600 (root only) -- node-exporter/prometheus run inside their
+    # containers with non-root UIDs and mount these directories read-only, so without this
+    # chmod they can't read anything this script writes.
     os.chmod(tmp, 0o644)
     os.replace(tmp, path)
 
@@ -141,7 +141,7 @@ def load_state_cache():
 
 
 def fetch_container_state(name):
-    """Una llamada 'az container show' -- solo se usa desde el pool acotado de refresh_state_cache."""
+    """One 'az container show' call -- only used from the bounded pool of refresh_state_cache."""
     result = az(
         "container", "show", "-g", RG, "-n", name,
         "--query", "{state:instanceView.state, restarts:containers[0].instanceView.restartCount}",
@@ -152,9 +152,9 @@ def fetch_container_state(name):
 
 
 def refresh_state_cache(names):
-    """Refresca el cache de estado SOLO para los nombres cuya entrada tiene mas de
-    STATE_REFRESH_SECONDS de antiguedad (o no existe todavia). Paralelizado con un pool acotado
-    para no convertir esto en 93 llamadas secuenciales -- ver docstring del modulo."""
+    """Refreshes the state cache ONLY for names whose entry is older than
+    STATE_REFRESH_SECONDS (or doesn't exist yet). Parallelized with a bounded pool
+    to avoid turning this into 93 sequential calls -- see module docstring."""
     cache = load_state_cache()
     now = time.time()
     stale = [n for n in names if now - cache.get(n, {}).get("ts", 0) >= STATE_REFRESH_SECONDS]
@@ -175,8 +175,8 @@ def main():
     os.makedirs(TARGETS_DIR, exist_ok=True)
     os.makedirs(TEXTFILE_DIR, exist_ok=True)
 
-    # az login --identity es idempotente (reusa el token cacheado si sigue vivo) -- no falla el
-    # script si ya hay sesion.
+    # az login --identity is idempotent (reuses cached token if still alive) -- script doesn't
+    # fail if a session already exists.
     subprocess.run(["az", "login", "--identity"], capture_output=True, text=True)
 
     containers = az(
@@ -198,21 +198,21 @@ def main():
     classified = {name: classify(name) for name in by_name}
     classified = {name: cls for name, cls in classified.items() if cls is not None}
 
-    # Estado de control plane: refresco acotado (STATE_REFRESH_SECONDS), no una llamada por
-    # nombre en cada tick -- ver docstring del modulo.
+    # Control plane state: bounded refresh (STATE_REFRESH_SECONDS), not one call per
+    # name per tick -- see module docstring.
     state_cache = refresh_state_cache(list(classified.keys()))
 
     targets = []
     drift_lines = [
-        "# HELP sabana_ip_drift 1 si la IP horneada (sed) en el dependiente ya no coincide con la "
-        "IP real de su dependencia -- ver docs/plans/observability-monitoring.md.",
+        "# HELP sabana_ip_drift 1 if the IP baked (sed) in the dependent no longer matches the "
+        "real IP of its dependency -- see docs/plans/observability-monitoring.md.",
         "# TYPE sabana_ip_drift gauge",
     ]
     state_lines = [
-        "# HELP sabana_container_state Estado de control plane del container group (1=Running). "
-        f"Refrescado cada {STATE_REFRESH_SECONDS}s, no en cada tick -- ver docstring del modulo.",
+        "# HELP sabana_container_state Control plane state of the container group (1=Running). "
+        f"Refreshed every {STATE_REFRESH_SECONDS}s, not on every tick -- see module docstring.",
         "# TYPE sabana_container_state gauge",
-        "# HELP sabana_container_restart_count restartCount reportado por Azure para el container 0.",
+        "# HELP sabana_container_restart_count restartCount reported by Azure for container 0.",
         "# TYPE sabana_container_restart_count gauge",
     ]
 
@@ -242,8 +242,8 @@ def main():
                 },
             })
 
-    # vm-wiki: no vive en 'az container list' (es una VM, no un container group) -- se agrega
-    # aparte con el mismo formato de target si esta desplegada.
+    # vm-wiki: doesn't live in 'az container list' (it's a VM, not a container group) -- added
+    # separately with the same target format if deployed.
     if wiki_ip:
         port, module = SERVICE_PROBES["wiki"]
         targets.append({
@@ -251,12 +251,12 @@ def main():
             "labels": {"group": "infra", "team": "", "service": "wiki", "name": "vm-wiki", "probe_module": module},
         })
 
-    # sabana_ip_drift: compara la IP horneada con 'sed' en el dependiente contra la IP real de su
-    # dependencia (ver "El huevo y la gallina" / DerivaDeIP en el plan). Solo se calcula si AMBOS
-    # extremos existen -- si la dependencia fue borrada, es un problema distinto (state=0 ya lo
-    # cubre) y no un drift.
+    # sabana_ip_drift: compares the IP baked with 'sed' in the dependent against the real IP of its
+    # dependency (see "The chicken and egg" / DerivaDeIP in the plan). Calculated only if BOTH
+    # ends exist -- if the dependency was deleted, it's a different problem (state=0 already covers it)
+    # and not a drift.
     drift_pairs = [
-        # (servicio dependiente, env var que lleva la IP horneada, extractor regex, servicio dependencia)
+        # (dependent service, env var carrying the baked IP, regex extractor, dependency service)
         ("webapp", "DB_HOST", r"^(.+)$", "database"),
         ("xss-bot", "WEBAPP_BASE_URL", r"^https?://([^:/]+)", "webapp"),
     ]

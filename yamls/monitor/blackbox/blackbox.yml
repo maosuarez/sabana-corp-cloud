@@ -1,5 +1,5 @@
-# blackbox.yml -- modulos usados por gen-targets.sh via el label probe_module (ver inventario de
-# sondas en docs/plans/observability-monitoring.md).
+# blackbox.yml -- modules used by gen-targets.sh via the probe_module label (see probe
+# inventory in docs/plans/observability-monitoring.md).
 modules:
   tcp_connect:
     prober: tcp
@@ -20,8 +20,8 @@ modules:
       query_response:
         - expect: "^SSH-"
 
-  # DnsCaido (ver docs/plans/observability-monitoring.md, tabla de alertas): consulta el propio
-  # dnsmasq del gateway (10.10.0.4:53) por un nombre que siempre deberia existir.
+  # DnsCaido (see docs/plans/observability-monitoring.md, alerts table): queries the gateway's
+  # dnsmasq (10.10.0.4:53) for a name that should always exist.
   dns_udp:
     prober: dns
     timeout: 5s

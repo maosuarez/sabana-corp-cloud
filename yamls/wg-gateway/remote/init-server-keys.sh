@@ -1,12 +1,12 @@
 #!/usr/bin/env bash
 #
-# init-server-keys.sh -- idempotente, pensado para correr via 'az vm run-command invoke' contra
-# vm-wg-gateway. El keypair real se genera en el primer boot (yamls/wg-gateway/cloud-init.yaml,
-# runcmd) porque wg-quick necesita PrivateKey definido para poder levantar wg0. Este script existe
-# para el caso de volver a pedir el PUBKEY del servidor despues (create_wg_peer en lab-azure.sh lo
-# corre de nuevo en vez de cachear el valor localmente) y como red de seguridad si algun dia se
-# necesita regenerar el keypair a mano en una VM que ya arranco sin el (edge case, no deberia
-# pasar en el flujo normal).
+# init-server-keys.sh -- idempotent, designed to run via 'az vm run-command invoke' against
+# vm-wg-gateway. The real keypair is generated on first boot (yamls/wg-gateway/cloud-init.yaml,
+# runcmd) because wg-quick needs PrivateKey defined to bring up wg0. This script exists
+# for the case of requesting the server PUBKEY again later (create_wg_peer in lab-azure.sh runs it
+# again instead of caching the value locally) and as a safety net if someday
+# the keypair needs to be regenerated manually on a VM that already started without it (edge case, should not
+# happen in normal flow).
 set -euo pipefail
 umask 077
 mkdir -p /etc/wireguard

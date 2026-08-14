@@ -1,12 +1,12 @@
-# Plantilla ACI: xss-bot, agnostica al numero de equipo (variable ${TEAM}).
-# Generar con: yamls/generate-team.sh <TEAM>
-# Secretos: compartidos por TODOS los equipos, vienen de yamls/.env.secrets -- ver yamls/README.md.
+# ACI template: xss-bot, agnostic to team number (variable ${TEAM}).
+# Generate with: yamls/generate-team.sh <TEAM>
+# Secrets: shared by ALL teams, come from yamls/.env.secrets -- see yamls/README.md.
 #
-# WEBAPP_BASE_URL: sin DNS entre container groups en ACI. Despliega team${TEAM}-webapp.yaml
-# primero, obten su IP con:
+# WEBAPP_BASE_URL: no DNS between container groups in ACI. Deploy team${TEAM}-webapp.yaml
+# first, get its IP with:
 #   az container show -g <RESOURCE_GROUP> -n team${TEAM}-webapp --query ipAddress.ip -o tsv
-# y reemplaza <WEBAPP_IP> en el archivo generado. Solo hace peticiones salientes; el puerto 80 en
-# ipAddress es un placeholder no usado -- ACI exige al menos uno para ipAddress type Private.
+# and replace <WEBAPP_IP> in the generated file. Only makes outgoing requests; port 80 in
+# ipAddress is an unused placeholder -- ACI requires at least one for ipAddress type Private.
 apiVersion: 2021-07-01
 location: eastus2
 name: team${TEAM}-xss-bot
@@ -22,10 +22,10 @@ properties:
         resources: {requests: {cpu: 0.25, memoryInGB: 0.5}}
         ports: [{port: 80}]
 
-  # DNSCONFIG-BEGIN -- lo elimina el generador si LAB_DNS_SERVER esta vacio (lab sin gateway).
-  # 2o nameserver a proposito: si dnsmasq no responde, el contenedor sigue resolviendo internet
-  # via Azure DNS. Los nombres del lab dejan de resolver, pero ningun reto se cae porque
-  # DB_HOST/WEBAPP_BASE_URL siguen siendo IPs (ver docs/plans/internal-dns.md).
+  # DNSCONFIG-BEGIN -- removed by generator if LAB_DNS_SERVER is empty (lab without gateway).
+  # 2nd nameserver on purpose: if dnsmasq doesn't respond, container keeps resolving internet
+  # via Azure DNS. Lab names stop resolving, but no challenge fails because
+  # DB_HOST/WEBAPP_BASE_URL remain IPs (see docs/plans/internal-dns.md).
   dnsConfig:
     nameServers:
       - "${LAB_DNS_SERVER}"

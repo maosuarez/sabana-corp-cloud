@@ -2,7 +2,7 @@ import assert from 'node:assert/strict'
 import { test } from 'node:test'
 import { runPool, scan } from '../src/scan.js'
 
-test('runPool: respeta el limite de concurrencia', async () => {
+test('runPool: respects the concurrency limit', async () => {
   let active = 0
   let maxActive = 0
   const items = Array.from({ length: 10 }, (_, i) => i)
@@ -18,28 +18,28 @@ test('runPool: respeta el limite de concurrencia', async () => {
     3
   )
 
-  assert.ok(maxActive <= 3, `maxActive fue ${maxActive}, esperaba <= 3`)
+  assert.ok(maxActive <= 3, `maxActive was ${maxActive}, expected <= 3`)
 })
 
-test('runPool: preserva el resultado en el orden de entrada', async () => {
+test('runPool: preserves result in input order', async () => {
   const items = [3, 1, 2]
   const results = await runPool(items, async (n) => n * 10, 2)
   assert.deepEqual(results, [30, 10, 20])
 })
 
-test('runPool: items vacios no revientan', async () => {
+test('runPool: empty items do not crash', async () => {
   const results = await runPool([], async (n) => n, 5)
   assert.deepEqual(results, [])
 })
 
-test('scan: contra loopback, un host sin puertos del catalogo abiertos sigue vivo (RST cuenta)', async () => {
+test('scan: against loopback, a host with no catalog ports open is still alive (RST counts)', async () => {
   const result = await scan({ cidrs: ['127.0.0.1/32'] })
   assert.equal(result.hosts.length, 1)
   assert.equal(result.hosts[0].ip, '127.0.0.1')
   assert.equal(result.addressesScanned, 1)
 })
 
-test('scan: hostsInCidr inyectable para pruebas sin abrir sockets reales de mas', async () => {
+test('scan: hostsInCidr injectable for testing without opening extra real sockets', async () => {
   const result = await scan({
     cidrs: ['10.60.99.0/24'],
     hostsInCidr: function* () {

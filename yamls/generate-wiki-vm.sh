@@ -1,23 +1,23 @@
 #!/usr/bin/env bash
 #
-# generate-wiki-vm.sh — genera el docker-compose.yml para la VM del wiki (snet-dmz-vm) a partir
-# de yamls/templates/wiki-vm-compose.yml.tpl.
+# generate-wiki-vm.sh — generates the docker-compose.yml for the wiki VM (snet-dmz-vm) from
+# yamls/templates/wiki-vm-compose.yml.tpl.
 #
-# Validado end-to-end 2026-08-08 -- ver docs/plans/wiki-on-vm.md. El compose generado se desplego
-# en vm-wiki y BookStack arranco correctamente contra su MariaDB.
+# Validated end-to-end 2026-08-08 -- see docs/plans/wiki-on-vm.md. The generated compose was deployed
+# on vm-wiki and BookStack started correctly against its MariaDB.
 #
-# Uso:
+# Usage:
 #   ./generate-wiki-vm.sh
 #
-# Escribe yamls/generated/wiki-vm-docker-compose.yml
+# Writes yamls/generated/wiki-vm-docker-compose.yml
 #
-# Los secretos del wiki son literales aca abajo, no vienen de .env.secrets -- igual que el resto
-# de la DMZ compartida (ver yamls/README.md "Pendiente / gaps conocidos"). Este es hoy el unico
-# lugar donde viven: las plantillas de ACI dmz-wiki*.yaml.tpl, que los duplicaban, ya no existen.
+# Wiki secrets are literals below, they do not come from .env.secrets -- same as the rest
+# of the shared DMZ (see yamls/README.md "Pending / known gaps"). This is currently the only
+# place where they live: the ACI templates dmz-wiki*.yaml.tpl, which duplicated them, no longer exist.
 
 set -euo pipefail
 
-command -v envsubst >/dev/null 2>&1 || { echo "[ERROR] falta 'envsubst' (paquete gettext-base)."; exit 1; }
+command -v envsubst >/dev/null 2>&1 || { echo "[ERROR] missing 'envsubst' (package gettext-base)."; exit 1; }
 
 WORKDIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
 TEMPLATES="${WORKDIR}/templates"
@@ -34,4 +34,4 @@ VARS='${WIKI_MYSQL_ROOT_PASSWORD} ${WIKI_DB_PASSWORD} ${WIKI_APP_KEY} ${LAB_DOMA
 in="${TEMPLATES}/wiki-vm-compose.yml.tpl"
 out="${OUTDIR}/wiki-vm-docker-compose.yml"
 envsubst "$VARS" < "$in" > "$out"
-echo "generado: $out"
+echo "generated: $out"

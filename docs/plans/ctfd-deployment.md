@@ -1,138 +1,76 @@
-# Plan: despliegue y automatización de CTFd (flags/scoreboard)
+# Plan: CTFd deployment and automation (flags/scoreboard)
 
-## Estado
+## Status
 
-**F1 implementada del lado de `../sabana-corp-CTFd` (2026-08-10, ver anotación al final del
-documento). F2 — validada end-to-end contra Azure real (2026-08-11, ver última anotación):
-`vm-ctfd` desplegada en `snet-dmz-vm`, `/setup` + admin + 5 challenges/flags cargados sin ningún
-click manual.** F3/F4 — CI de imagen propia (cuenta Docker Hub pendiente), operación del evento —
-siguen en diseño.
+**Phase 1 implemented in `../sabana-corp-CTFd` (2026-08-10, see note at end of document). Phase 2 — validated end-to-end against real Azure (2026-08-11, see final note): `vm-ctfd` deployed in `snet-dmz-vm`, `/setup` + admin + 5 challenges/flags loaded without any manual clicks.** Phase 3/4 — custom image CI (Docker Hub account pending), event operations — remain in design.
 
-Este documento nació de una sesión de planeación (2026-08-10): entender el repo
-`../sabana-corp-CTFd` (fork de CTFd oficial) y decidir cómo encaja en la infraestructura que ya
-existe en este repo, antes de escribir una sola línea de automatización.
+This document originated from a planning session (2026-08-10): understand the `../sabana-corp-CTFd` repository (fork of official CTFd) and decide how it fits into the infrastructure already existing in this repo, before writing a single line of automation.
 
-Decisión ya tomada en la sesión de planeación (ver "Equipos competidores" abajo): **auto-registro
-abierto**, sin automatización de creación de equipos.
+Decision already made in the planning session (see "Competing Teams" below): **open self-registration**, without automated team creation.
 
-## Qué es `../sabana-corp-CTFd`
+## What is `../sabana-corp-CTFd`
 
-Fork de [CTFd/CTFd](https://github.com/CTFd/CTFd) (`origin` → `Kings0401/CTFd-Sabanus`), casi
-vanilla: 2 commits propios sobre upstream, ambos de configuración, ninguno toca código Python de
-la app (`CTFd/`):
+Fork of [CTFd/CTFd](https://github.com/CTFd/CTFd) (`origin` → `Kings0401/CTFd-Sabanus`), nearly vanilla: 2 custom commits on top of upstream, both configuration, none touches Python app code (`CTFd/`):
 
-1. `docker-compose.yml` parametrizado con `.env` (puerto, `SECRET_KEY`, credenciales de DB) en vez
-   de los literales `ctfd`/`ctfd`/`ctfd` que trae upstream.
-2. Eliminado un workflow heredado (`mirror-core-theme.yml`) que no aplica a este fork.
+1. `docker-compose.yml` parameterized with `.env` (port, `SECRET_KEY`, DB credentials) instead of the hardcoded `ctfd`/`ctfd`/`ctfd` that upstream includes.
+2. Removed an inherited workflow (`mirror-core-theme.yml`) that doesn't apply to this fork.
 
-No hay automatización de challenges, flags ni equipos todavía — CTFd tal cual se clona requiere
-crear cada reto a mano por la UI de admin. Ese es el hueco que cierra este plan.
+No automation for challenges, flags, or teams yet — CTFd as cloned requires creating each challenge manually via admin UI. This plan closes that gap.
 
-## Motivación
+## Motivation
 
-`CLAUDE.md` de este repo ya lista **CTFd (flags y scoreboard)** como servicio compartido de
-`snet-dmz-shared`, marcado "no implementado todavía". Las 5 flags reales del evento ya existen
-como variables de entorno en `yamls/.env.secrets` (plantilla en `yamls/.env.secrets.example`) y
-alimentan los contenedores de cada equipo — pero nadie las ha cargado en una plataforma de
-scoring. Sin esto, el evento no tiene forma de validar ni puntuar una flag entregada por un
-participante.
+This repo's `CLAUDE.md` already lists **CTFd (flags and scoreboard)** as a shared service of `snet-dmz-shared`, marked "not yet implemented". The 5 real flags for the event already exist as environment variables in `yamls/.env.secrets` (template in `yamls/.env.secrets.example`) and feed the containers for each team — but no one has loaded them into a scoring platform. Without this, the event has no way to validate or score a flag submitted by a participant.
 
-Dos preguntas del usuario delimitan el alcance de este plan:
+Two user questions define the scope of this plan:
 
-1. ¿Cómo se despliega CTFd en Azure (Web App, ACI, o VM) de la mejor forma posible?
-2. ¿Cómo se **precrean** en CTFd los espacios (challenges) para cada una de las flags que ya
-   existen en `yamls/.env.secrets`, y cómo se crean los equipos competidores?
+1. How is CTFd deployed on Azure (Web App, ACI, or VM) in the best possible way?
+2. How are the spaces (challenges) for each of the flags that already exist in `yamls/.env.secrets` **pre-created** in CTFd, and how are competing teams created?
 
-## Decisión de diseño: destino de despliegue — VM con docker-compose
+## Design decision: deployment target — VM with docker-compose
 
-Tres opciones evaluadas:
+Three options evaluated:
 
-**a) Azure Web App for Containers.** Descartada. El modelo de Web App es de servicio público por
-defecto (endpoint HTTPS público); ocultarlo detrás de la VNet-sin-internet del lab (arquitectura
-de este repo: "se llega tras romper un portal cautivo y autenticarse por VPN") exigiría VNet
-integration + private endpoint + deshabilitar acceso público — más superficie a mantener que
-simplemente sumar una VM, que es justo el patrón que este repo ya resolvió dos veces. Además el
-soporte de Web App para "multi-container vía docker-compose" (necesario para el stack real de
-CTFd: app + MariaDB + Redis + nginx) es un modo semi-heredado de App Service, no la forma
-recomendada actual de Azure para stacks con estado.
+**a) Azure Web App for Containers.** Rejected. The Web App model is for public service by default (public HTTPS endpoint); hiding it behind the lab's internet-free VNet (this repo's architecture: "accessed only after breaking a captive portal and authenticating via VPN") would require VNet integration + private endpoint + disabling public access — more surface to maintain than simply adding a VM, which is exactly the pattern this repo has already solved twice. Also, Web App's support for "multi-container via docker-compose" (necessary for CTFd's real stack: app + MariaDB + Redis + nginx) is a semi-legacy mode of App Service, not Azure's current recommended approach for stateful stacks.
 
-**b) Azure Container Instances**, siguiendo la convención "1 YAML = 1 contenedor = 1 IP" del
-resto del repo. Descartada por ahora. Igual que con el wiki
-(`docs/plans/wiki-on-vm.md`), CTFd necesita: persistencia real (MariaDB con los datos del evento,
-uploads de archivos adjuntos de challenges) y aislamiento de red interno (`app` habla con `db` y
-`cache` en una red que no debe quedar expuesta en la VNet compartida). Llevarlo a ACI exigiría (i)
-partir el `docker-compose.yml` de CTFd en 3-4 YAML de contenedor individual, (ii) resolver la
-dependencia de IP entre ellos con el mismo `sed` que usa `deploy_dmz`/`deploy_team` (frágil, un
-paso más de mantenimiento), y (iii) reemplazar los volúmenes locales por Azure Files para que los
-datos sobrevivan a un restart — tres piezas de complejidad nueva que la opción (c) no necesita
-porque CTFd **ya trae su propio `docker-compose.yml` completo y probado por upstream**.
+**b) Azure Container Instances**, following the repo's "1 YAML = 1 container = 1 IP" convention. Rejected for now. Like with the wiki (`docs/plans/wiki-on-vm.md`), CTFd requires: real persistence (MariaDB with event data, challenge attachment uploads) and internal network isolation (`app` talks to `db` and `cache` on a network that shouldn't be exposed in the shared VNet). Moving it to ACI would require (i) splitting CTFd's `docker-compose.yml` into 3-4 individual container YAML files, (ii) resolving the IP dependency between them with the same `sed` that `deploy_dmz`/`deploy_team` uses (fragile, one more maintenance step), and (iii) replacing local volumes with Azure Files so data survives a restart — three pieces of new complexity that option (c) doesn't need because CTFd **already brings its own complete, upstream-tested `docker-compose.yml`**.
 
-**c) VM con `docker-compose` (el `docker-compose.yml` que el propio repo CTFd ya trae).**
-Elegida. Mismo patrón exacto que `vm-wiki` (`docs/plans/wiki-on-vm.md`) y `vm-monitor`
-(`docs/plans/observability-monitoring.md`): cloud-init instala Docker, se copia/genera el compose,
-`docker compose up -d` vía `az vm run-command invoke`. Cero piezas nuevas de diseño — es
-replicar un patrón ya validado end-to-end dos veces contra Azure real, con la ventaja añadida de
-que aquí ni siquiera hay que escribir el `docker-compose.yml` a mano: ya existe en
-`../sabana-corp-CTFd/docker-compose.yml`, mantenido por upstream.
+**c) VM with `docker-compose` (the `docker-compose.yml` that the CTFd repo itself already brings).** Chosen. Exact same pattern as `vm-wiki` (`docs/plans/wiki-on-vm.md`) and `vm-monitor` (`docs/plans/observability-monitoring.md`): cloud-init installs Docker, compose is copied/generated, `docker compose up -d` via `az vm run-command invoke`. Zero new design pieces — it's replicating a pattern already validated end-to-end twice against real Azure, with the added advantage that here we don't even need to write the `docker-compose.yml` by hand: it already exists in `../sabana-corp-CTFd/docker-compose.yml`, maintained by upstream.
 
-### Ubicación de red
+### Network location
 
-`snet-dmz-shared` está delegada a `Microsoft.ContainerInstance/containerGroups` (exclusiva, ver
-`docs/plans/wiki-on-vm.md`) — una VM no puede ir ahí, mismo choque que tuvo el wiki. En vez de
-crear una tercera subred, **reusar `snet-dmz-vm` (`10.51.0.0/24`)**, que ya existe exactamente
-para esto: "DMZ paralela para servicios que no corren en ACI". `vm-ctfd` viviría junto a `vm-wiki`
-en la misma subred, sin necesidad de una subred nueva ni de tocar `create_vnet`.
+`snet-dmz-shared` is delegated to `Microsoft.ContainerInstance/containerGroups` (exclusive, see `docs/plans/wiki-on-vm.md`) — a VM cannot go there, the same conflict the wiki had. Instead of creating a third subnet, **reuse `snet-dmz-vm` (`10.51.0.0/24`)**, which already exists exactly for this: "parallel DMZ for services that don't run in ACI". `vm-ctfd` would live alongside `vm-wiki` in the same subnet, without needing a new subnet or touching `create_vnet`.
 
-Abierto: ¿una VM nueva (`vm-ctfd`) o coexistir en `vm-wiki` corriendo un segundo
-`docker-compose.yml`? Se recomienda **VM separada** — CTFd trae su propia MariaDB y Redis; meterlo
-en la misma VM que BookStack+MariaDB del wiki duplica el patrón de aislamiento por red bridge de
-Docker que cada compose ya resuelve solo, sin ganar nada a cambio salvo un poco de cuota de vCPU
-(hay margen: 6/10 vCPU en uso hoy según `docs/plans/observability-monitoring.md` "Costo y cuota").
+Open question: a new VM (`vm-ctfd`) or coexist in `vm-wiki` running a second `docker-compose.yml`? **Separate VM recommended** — CTFd brings its own MariaDB and Redis; putting it in the same VM as the wiki's BookStack+MariaDB duplicates the Docker bridge network isolation pattern that each compose already handles on its own, gaining nothing except a bit of vCPU quota (there's headroom: 6/10 vCPU in use today according to `docs/plans/observability-monitoring.md` "Cost and quota").
 
-## Decisión de diseño: cómo se precrean los challenges/flags
+## Design decision: how challenges/flags are pre-created
 
-Este es el corazón de la pregunta del usuario. Opciones evaluadas:
+This is the heart of the user's question. Options evaluated:
 
-**a) `ctfcli` (herramienta oficial de CTFd para "challenges as code").** Descartada. Su modelo es
-para retos que **son** el contenido a subir (archivos adjuntos, imagen Docker del propio reto,
-`challenge.yml` con `image:`/`build:`). Los "retos" de Sabana Corp no son eso — son servicios de
-infraestructura ya en vivo (`webapp`, `database`, `linux-server`) que `lab-azure.sh` despliega por
-su cuenta; en CTFd solo necesitan existir como **entrada de puntaje** (nombre, categoría,
-descripción, flag). Adoptar `ctfcli` traería un formato y un flujo pensados para un caso que no es
-el nuestro, sin resolver nada que un script simple no resuelva mejor.
+**a) `ctfcli` (CTFd's official "challenges as code" tool).** Rejected. Its model is for challenges that **are** the content to upload (attachments, Docker image of the challenge itself, `challenge.yml` with `image:`/`build:`). Sabana Corp's "challenges" are not that — they're live infrastructure services (`webapp`, `database`, `linux-server`) that `lab-azure.sh` deploys on its own; in CTFd they only need to exist as **scoring entries** (name, category, description, flag). Adopting `ctfcli` would bring a format and workflow designed for a case that isn't ours, without solving anything a simple script won't solve better.
 
-**b) Import/export de CTFd (`export_ctf`/`import_ctf`, backup en `.zip`).** Descartada como fuente
-de verdad. Es un formato de backup completo de la instancia (usuarios, submissions, config), no un
-manifiesto legible ni diffeable en git — no encaja con "plantillas + generadores" (decisión ya
-registrada en `CLAUDE.md` de este repo). Puede servir más adelante como backup operativo entre
-ediciones del evento, pero no como definición de challenges.
+**b) CTFd import/export (`export_ctf`/`import_ctf`, backup in `.zip`).** Rejected as source of truth. It's a complete instance backup format (users, submissions, config), not a readable or git-diffable manifest — it doesn't fit with "templates + generators" (decision already recorded in this repo's `CLAUDE.md`). It can serve later as operational backup between event editions, but not as challenge definition.
 
-**c) Script propio contra la API REST admin de CTFd (`/api/v1/challenges`, `/api/v1/flags`),
-idempotente, leyendo un manifiesto declarativo versionado.** Elegida — mismo espíritu que
-`generate-team.sh`/`generate-dmz.sh`: una fuente de verdad declarativa + un generador/aplicador,
-nada de estado a mano por la UI.
+**c) Custom script against CTFd's admin REST API (`/api/v1/challenges`, `/api/v1/flags`), idempotent, reading a versioned declarative manifest.** Chosen — same spirit as `generate-team.sh`/`generate-dmz.sh`: a declarative source of truth + a generator/applier, no manual state via UI.
 
-### Diseño del manifiesto y el seed
+### Manifest and seed design
 
-- **Manifiesto** (`../sabana-corp-CTFd/challenges/challenges.yml`, vive en el repo de CTFd, no en
-  este): un challenge por flag, referenciando el **nombre** de la variable de flag
-  (`FLAG_WEBAPP_XSS`), nunca su valor.
+- **Manifest** (`../sabana-corp-CTFd/challenges/challenges.yml`, lives in the CTFd repo, not this one): one challenge per flag, referencing the **name** of the flag variable (`FLAG_WEBAPP_XSS`), never its value.
 
   ```yaml
   - name: "Web App — Stored XSS"
     category: "Web Application"
     flag_env: FLAG_WEBAPP_XSS
     value: 100
-    state: hidden   # visible solo cuando el staff publica el evento
+    state: hidden   # visible only when staff publishes the event
     description: |
       ...
-  - name: "Web App — LFI en adjuntos"
+  - name: "Web App — LFI on attachments"
     category: "Web Application"
     flag_env: FLAG_WEBAPP_LFI
     value: 50
     state: hidden
-  - name: "Base de Datos"
-    category: "Base de Datos"
+  - name: "Database"
+    category: "Database"
     flag_env: FLAG_DATABASE
     value: 100
     state: hidden
@@ -141,185 +79,92 @@ nada de estado a mano por la UI.
     flag_env: FLAG_LINUXSERVER_ROOT
     value: 150
     state: hidden
-  - name: "Linux Server — flag en proceso"
+  - name: "Linux Server — process flag"
     category: "Linux Server"
     flag_env: FLAG_LINUXSERVER_PROC
     value: 25
     state: hidden
   ```
 
-  Puntos (`value`) y descripciones son responsabilidad de quien organiza el evento, no de este
-  documento — quedan como placeholder.
+  Points (`value`) and descriptions are the event organizer's responsibility, not this document — they remain as placeholders.
 
-- **Seed script** (`../sabana-corp-CTFd/scripts/seed_challenges.py` o similar, en el repo de
-  CTFd): lee `challenges.yml`, lee los valores reales de flag desde `yamls/.env.secrets` (en
-  **este** repo, gitignored — el script recibe la ruta o las variables ya exportadas, nunca las
-  hardcodea), y llama a la API admin de CTFd (`Authorization: Token <admin_api_token>`) para
-  crear/actualizar cada challenge + su flag. Idempotente: si el challenge ya existe (match por
-  `name`), actualiza en vez de duplicar — necesario porque el script se va a correr más de una vez
-  (ediciones futuras del evento, cambio de puntaje, typo en la descripción).
-- **Explícitamente fuera del seed**: `PIVOT_SSH_PASSWORD` y `BOT_SECRET` no son flags de score —
-  son secretos de progresión (terminología de `sabana-corp-network/CLAUDE.md`, "Reglas para
-  mantener consistencia entre flags"). No generan challenge en CTFd.
-- **Challenges nacen ocultos** (`state: hidden`). Un segundo comando del mismo script (o un flag
-  `--publish`) los pasa a `visible` — separar "cargar contenido" de "abrir el CTF al público" para
-  no exponer nombres/categorías de reto por accidente antes del arranque del evento.
-- Fuente del token admin — **automatizado 2026-08-10, ver anotación al final**: `CTFD_PRESET_ADMIN_TOKEN`
-  en `yamls/.env.secrets`, no un Access Token generado a mano por el staff. CTFd expone
-  `PRESET_ADMIN_TOKEN` justamente para este caso (variable de entorno que actúa como token de un
-  admin creado al vuelo) — vive junto a los demás secretos del evento, nunca commiteado. Ver
-  "Riesgos" abajo.
+- **Seed script** (`../sabana-corp-CTFd/scripts/seed_challenges.py` or similar, in the CTFd repo): reads `challenges.yml`, reads actual flag values from `yamls/.env.secrets` (in **this** repo, gitignored — the script receives the path or already-exported variables, never hardcodes them), and calls CTFd's admin API (`Authorization: Token <admin_api_token>`) to create/update each challenge + its flag. Idempotent: if the challenge already exists (match by `name`), updates instead of duplicating — necessary because the script will run more than once (future event editions, point changes, typos in description).
+- **Explicitly out of scope for the seed**: `PIVOT_SSH_PASSWORD` and `BOT_SECRET` are not scoring flags — they're progression secrets (terminology from `sabana-corp-network/CLAUDE.md`, "Rules for maintaining consistency between flags"). They don't generate a challenge in CTFd.
+- **Challenges start hidden** (`state: hidden`). A second command from the same script (or a `--publish` flag) changes them to `visible` — separate "load content" from "open the CTF to the public" to avoid exposing challenge names/categories before the event starts.
+- Admin token source — **automated 2026-08-10, see note at end**: `CTFD_PRESET_ADMIN_TOKEN` in `yamls/.env.secrets`, not an Access Token generated manually by staff. CTFd exposes `PRESET_ADMIN_TOKEN` exactly for this case (environment variable that acts as a token for a dynamically created admin) — it lives alongside other event secrets, never committed. See "Risks" below.
 
-## Equipos competidores — auto-registro abierto (decidido en esta sesión)
+## Competing Teams — open self-registration (decided in this session)
 
-En CTFd, un "equipo" (`user_mode=teams`) es solo un grupo de puntuación: nombre + password de
-ingreso que los propios participantes eligen al registrarse, sin relación automática con
-`team1..teamN` de la red de este repo. Esto es así porque las flags son **idénticas para todos los
-equipos** (`yamls/.env.secrets` no varía por `${TEAM}`, ver `CLAUDE.md`) — CTFd no necesita saber
-en qué subred/túnel WireGuard está cada participante para poder puntuar su flag.
+In CTFd, a "team" (`user_mode=teams`) is just a scoring group: name + login password that participants choose themselves during registration, with no automatic relationship to `team1..teamN` on this repo's network. This is because the flags are **identical for all teams** (`yamls/.env.secrets` doesn't vary by `${TEAM}`, see `CLAUDE.md`) — CTFd doesn't need to know which subnet/WireGuard tunnel each participant is on to score their flag.
 
-Decisión: **auto-registro abierto**, sin automatización nueva de creación de equipos. Es el flujo
-default de CTFd (`Setup` → `user_mode: teams`) y no requiere script ni credenciales
-pre-distribuidas.
+Decision: **open self-registration**, without new team creation automation. It's CTFd's default flow (`Setup` → `user_mode: teams`) and requires no script or pre-distributed credentials.
 
-Configuración a definir en el setup inicial de CTFd (una vez, por la UI, no automatizada — no vale
-la pena un script para algo que se hace una sola vez por edición del evento):
+Configuration to define in CTFd's initial setup (once, via the UI, not automated — not worth a script for something done once per event edition):
 
 - `user_mode: teams`, `registration_visibility: public`.
-- `team_size`: límite de integrantes por equipo (definir según el evento).
-- `verify_emails`: probablemente `false` — evento cerrado dentro de un CTF universitario de un
-  día, la fricción de verificación por correo no aporta nada aquí.
+- `team_size`: member limit per team (define per event).
+- `verify_emails`: probably `false` — closed event within a one-day university CTF, email verification friction adds nothing here.
 
-**Advertencia operativa** (no es un problema técnico, es una nota para el staff del evento): el
-nombre de equipo que un participante elige en CTFd no coincide automáticamente con el `teamN` de
-su túnel WireGuard/subred. Es aceptable porque el sistema no lo necesita, pero conviene pedirle a
-cada equipo — como instrucción del evento, no como control técnico — que use su número de red como
-nombre de equipo en CTFd, solo para que el staff pueda cruzar el scoreboard con la infraestructura
-a simple vista si hace falta soporte.
+**Operational note** (not a technical problem, just a note for the event staff): the team name a participant chooses in CTFd doesn't automatically match their `teamN` on the WireGuard tunnel/subnet. It's acceptable because the system doesn't need it, but it's good practice to ask each team — as an event instruction, not a technical control — to use their network number as their team name in CTFd, just so staff can cross-reference the scoreboard with the infrastructure at a glance if support is needed.
 
 ## CI/CD
 
-Convención ya establecida y documentada en `sabana-corp-network/CLAUDE.md` ("Convenciones para
-CI/CD"), que este plan adopta tal cual para mantener los 3 repos del proyecto consistentes:
+Convention already established and documented in `sabana-corp-network/CLAUDE.md` ("CI/CD conventions"), which this plan adopts as-is to keep the 3 project repos consistent:
 
-- Build + push de imagen en cada push a `main` (no en `release`, a diferencia del `docker-build.yml`
-  actual del fork — ver hallazgo abajo).
-- Tags `<usuario-dockerhub>/<imagen>:latest` + `:<sha-corto>`.
-- Los workflows nunca usan valores reales de flags/secretos — solo `.env.example`/defaults
-  ficticios; los secretos reales se inyectan en el despliegue real, fuera de CI.
+- Image build + push on every push to `main` (not on `release`, unlike the fork's current `docker-build.yml` — see finding below).
+- Tags `<dockerhub-user>/<image>:latest` + `:<short-sha>`.
+- Workflows never use real flag/secret values — only `.env.example`/dummy defaults; real secrets are injected on actual deployment, outside CI.
 
-### Hallazgo: CI heredado de upstream está roto en este fork, sin que nadie lo haya notado
+### Finding: inherited upstream CI is broken in this fork, unnoticed
 
-`../sabana-corp-CTFd` tiene 7 workflows heredados de CTFd/CTFd. De esos, **6 nunca corren**:
-`mariadb.yml`, `mysql.yml`, `mysql8.yml`, `postgres.yml`, `sqlite.yml`, `verify-themes.yml` están
-todos activados con `branches: [master]` — el fork usa `main` como rama por defecto. Ningún push a
-`main` ni PR contra `main` los dispara jamás. Solo dos workflows sí corren hoy:
+`../sabana-corp-CTFd` has 7 workflows inherited from CTFd/CTFd. Of those, **6 never run**: `mariadb.yml`, `mysql.yml`, `mysql8.yml`, `postgres.yml`, `sqlite.yml`, `verify-themes.yml` are all activated with `branches: [master]` — the fork uses `main` as the default branch. No push to `main` or PR against `main` ever triggers them. Only two workflows actually run today:
 
-- `lint.yml` — activado con `on: [push, pull_request]` sin filtro de rama, sí corre.
-- `docker-build.yml` — activado con `on: release: types: [published]`, publica
-  `${GITHUB_REPOSITORY,,}` (hoy `kings0401/ctfd-sabanus`) a Docker Hub + GHCR usando secretos
-  `DOCKERHUB_USERNAME`/`DOCKERHUB_TOKEN` del repo de GitHub — corre solo si alguien publica un
-  GitHub Release, que no ha pasado nunca en este fork.
+- `lint.yml` — activated with `on: [push, pull_request]` without branch filter, it runs.
+- `docker-build.yml` — activated with `on: release: types: [published]`, publishes `${GITHUB_REPOSITORY,,}` (today `kings0401/ctfd-sabanus`) to Docker Hub + GHCR using repo GitHub secrets `DOCKERHUB_USERNAME`/`DOCKERHUB_TOKEN` — runs only if someone publishes a GitHub Release, which has never happened in this fork.
 
-Dos decisiones pendientes, no tomadas en esta sesión (son del dueño del repo/evento, no técnicas):
+Two pending decisions, not taken in this session (they're for the repo/event owner, not technical):
 
-1. **Qué hacer con los 6 workflows muertos.** Opciones: (a) retarget a `main` para recuperar la
-   cobertura de tests de upstream sobre este fork, (b) eliminarlos porque este fork no piensa
-   mergear activamente de upstream CTFd y mantener 5 matrices de DB distintas (solo se despliega
-   con MariaDB, ver `docker-compose.yml`) no aporta valor real — coherente con la memoria de
-   proyecto "docs deben reflejar la realidad probada: eliminar artefactos muertos en vez de
-   documentarlos".
-2. **Cuenta de Docker Hub destino.** `docker-build.yml` hoy publica bajo el nombre del repo de
-   GitHub (`kings0401/...`), no bajo `maosuarez` (la cuenta que usa el resto del proyecto para
-   `sabanacorp-*`, ver `CLAUDE.md` de este repo, "Decisión de diseño: plantillas + generadores").
-   Definir si la imagen de CTFd se publica en `maosuarez/sabanacorp-ctfd` (consistente con el
-   resto) o se queda en la cuenta del dueño de `sabana-corp-CTFd` — afecta qué secretos de GitHub
-   Actions hay que configurar y en qué cuenta.
+1. **What to do with the 6 dead workflows.** Options: (a) retarget to `main` to recover upstream test coverage for this fork, (b) delete them because this fork doesn't plan to actively merge from upstream CTFd and maintaining 5 different DB matrices (only deployed with MariaDB, see `docker-compose.yml`) adds no real value — consistent with project memory "docs must reflect tested reality: delete dead artifacts instead of documenting them".
+2. **Target Docker Hub account.** `docker-build.yml` today publishes under the GitHub repo name (`kings0401/...`), not under `maosuarez` (the account the rest of the project uses for `sabanacorp-*`, see this repo's `CLAUDE.md`, "Design decision: templates + generators"). Define whether the CTFd image publishes to `maosuarez/sabanacorp-ctfd` (consistent with the rest) or stays in the `sabana-corp-CTFd` owner's account — affects which GitHub Actions secrets need configuring and in which account.
 
-Propuesta concreta para cuando se decida lo anterior (no implementada): reemplazar
-`docker-build.yml` por un workflow `push a main` estilo `sabana-corp-dmz/docker-publish.yml` /
-`sabana-corp-network/build-push.yml` — un solo job, sin matrix (una sola imagen), tags
-`:latest` + `:<sha-corto>`.
+Concrete proposal for when the above is decided (not yet implemented): replace `docker-build.yml` with a `push to main` workflow like `sabana-corp-dmz/docker-publish.yml` / `sabana-corp-network/build-push.yml` — single job, no matrix (single image), tags `:latest` + `:<short-sha>`.
 
-## Integración futura con `lab-azure.sh`
+## Future integration with `lab-azure.sh`
 
-No implementado, solo el esqueleto de qué haría falta, para no repetir diseño cuando se decida
-ejecutar esto:
+Not yet implemented, just the skeleton of what would be needed to avoid repeating design when deciding to execute this:
 
-- `deploy-ctfd-vm`: mismo patrón que `deploy-wiki-vm`/`deploy-monitor-vm` — crea `vm-ctfd` en
-  `snet-dmz-vm`, cloud-init instala Docker, copia/genera el `docker-compose.yml` (usando la imagen
-  publicada por CI en vez de build local en la VM, más rápido y reproducible), variables desde un
-  bloque nuevo `CTFD_*` en `yamls/.env.secrets` (puerto, `SECRET_KEY`, credenciales de DB — mismo
-  patrón que ya usa el `.env.example` del propio fork).
-- Al final del despliegue: correr `seed_challenges.py` vía `az vm run-command invoke` (o desde el
-  operador, contra la IP privada por el túnel admin) — mismo mecanismo ya usado en este repo para
-  todo lo que toca una VM sin SSH.
-- `status` de `lab-azure.sh` ganaría una sección para `vm-ctfd`, igual que ya tiene para
-  `vm-wiki`/`vm-monitor`/gateway.
+- `deploy-ctfd-vm`: same pattern as `deploy-wiki-vm`/`deploy-monitor-vm` — creates `vm-ctfd` in `snet-dmz-vm`, cloud-init installs Docker, copies/generates the `docker-compose.yml` (using the image published by CI instead of building locally on the VM, faster and reproducible), variables from a new `CTFD_*` block in `yamls/.env.secrets` (port, `SECRET_KEY`, DB credentials — same pattern already used by the fork's `.env.example`).
+- At the end of deployment: run `seed_challenges.py` via `az vm run-command invoke` (or from the operator, against the private IP via the admin tunnel) — same mechanism already used in this repo for anything touching a VM without SSH.
+- `lab-azure.sh`'s `status` would gain a section for `vm-ctfd`, like it already has for `vm-wiki`/`vm-monitor`/gateway.
 
-## Riesgos / abierto
+## Risks / Open items
 
-- **Token admin del seed script — RESUELTO (2026-08-10)**: `CTFD_PRESET_ADMIN_TOKEN`
-  (`yamls/.env.secrets`) reemplaza la generación manual del Access Token. CTFd lo acepta como
-  Access Token de un admin que crea al vuelo si no existe (ver
-  `CTFd/utils/security/auth.py:lookup_user_token`/`generate_preset_admin`), así que
-  `create_ctfd_vm()` corre `seed_challenges.py` automáticamente sin login por navegador. Sigue
-  siendo el mismo nivel de secreto que una password de admin — vive fuera de git, tratarlo como
-  `MYSQL_ROOT_PASSWORD`.
-- **El wizard de `/setup` también quedó automatizado (2026-08-10)**: `PRESET_ADMIN_TOKEN` no
-  alcanza solo — CTFd bloquea *toda* request (incluida la API) hasta que `/setup` se completa (ver
-  `needs_setup()` en `CTFd/utils/initialization/__init__.py`), y ese endpoint es un form HTML con
-  CSRF atado a la sesión del navegador, no una API. En vez de scrapear el HTML,
-  `scripts/seed_setup.py` (nuevo, en `../sabana-corp-CTFd`) replica la lógica de la vista
-  `/setup` directo contra los modelos de CTFd (`set_config` + crear el `Admins`), corriendo
-  *dentro* del contenedor `ctfd` (`docker compose exec ctfd python3 -`, necesita el paquete CTFd
-  instalado — a diferencia de `seed_challenges.py`, que corre desde el host de la VM con solo
-  `requests`+`PyYAML`). Fija `user_mode=teams`, `registration_visibility=public`,
-  `verify_emails=false` (las decisiones de "Equipos competidores" arriba); usa
-  `CTFD_EVENT_NAME`/`CTFD_EVENT_DESCRIPTION`/`CTFD_TEAM_SIZE` (`yamls/.env.secrets`) y el mismo
-  admin que `PRESET_ADMIN_TOKEN` (incluso si corren en cualquier orden, no se duplica la cuenta —
-  ambos matchean por email). Idempotente: si `is_setup()` ya es `true`, no toca nada, así que
-  `deploy-ctfd-vm` es seguro de re-correr sin resetear el nombre/admin de una edición anterior.
-- **Persistencia entre ediciones del evento**: CTFd guarda submissions/scoreboard en su MariaDB.
-  Si `vm-ctfd` se destruye con `./lab-azure.sh down` (borra el RG completo, invariante del
-  proyecto), se pierde el historial del evento salvo que se haga `export_ctf` antes — no
-  decidido si eso se automatiza (cron en la VM, o paso manual al cerrar el evento).
-- **`SECRET_KEY` de CTFd**: firma las sesiones de todos los usuarios registrados (staff y
-  participantes). Rotarlo invalida sesiones activas — generarlo una vez por edición del evento y
-  tratarlo como secreto, igual que `JWT_SIGNING_SECRET` de los retos.
-- **Tamaño de `vm-ctfd`**: sin decidir, probablemente `Standard_D2s_v7` por consistencia con
-  `vm-wiki`/`vm-monitor`/`vm-wg-gateway`, no por un cálculo real de carga (CTFd para un evento de
-  un día con decenas de equipos es liviano).
-- **Quién publica el evento (`state: hidden` → `visible`)**: decidir si es un flag del seed script,
-  un botón en la UI de CTFd (ya existe, "Freeze"/fechas de inicio nativas de CTFd), o ambos — CTFd
-  ya trae `start`/`end` de CTF nativos, puede que no haga falta nada nuevo aquí más que
-  configurarlos en el setup inicial.
+- **Seed script admin token — RESOLVED (2026-08-10)**: `CTFD_PRESET_ADMIN_TOKEN` (`yamls/.env.secrets`) replaces manual Access Token generation. CTFd accepts it as an Access Token for an admin it creates on-the-fly if it doesn't exist (see `CTFd/utils/security/auth.py:lookup_user_token`/`generate_preset_admin`), so `create_ctfd_vm()` runs `seed_challenges.py` automatically without browser login. It's still the same secret level as an admin password — lives outside git, treat it like `MYSQL_ROOT_PASSWORD`.
+- **The `/setup` wizard is also automated (2026-08-10)**: `PRESET_ADMIN_TOKEN` alone isn't enough — CTFd blocks *all* requests (including API) until `/setup` is complete (see `needs_setup()` in `CTFd/utils/initialization/__init__.py`), and that endpoint is an HTML form with CSRF tied to the browser session, not an API. Instead of scraping HTML, `scripts/seed_setup.py` (new, in `../sabana-corp-CTFd`) replicates the `/setup` view logic directly against CTFd models (`set_config` + create the `Admins`), running *inside* the `ctfd` container (`docker compose exec ctfd python3 -`, needs the CTFd package installed — unlike `seed_challenges.py`, which runs from the VM host with just `requests`+`PyYAML`). Sets `user_mode=teams`, `registration_visibility=public`, `verify_emails=false` (the "Competing Teams" decisions above); uses `CTFD_EVENT_NAME`/`CTFD_EVENT_DESCRIPTION`/`CTFD_TEAM_SIZE` (`yamls/.env.secrets`) and the same admin as `PRESET_ADMIN_TOKEN` (even if they run in any order, no duplicate account — both match by email). Idempotent: if `is_setup()` is already `true`, it touches nothing, so `deploy-ctfd-vm` is safe to re-run without resetting the name/admin from a previous edition.
+- **Persistence between event editions**: CTFd stores submissions/scoreboard in its MariaDB. If `vm-ctfd` is destroyed with `./lab-azure.sh down` (deletes the entire Resource Group, project invariant), event history is lost unless `export_ctf` is done first — not yet decided if that's automated (cron on the VM, or manual step when closing the event).
+- **CTFd `SECRET_KEY`**: signs sessions for all registered users (staff and participants). Rotating it invalidates active sessions — generate once per event edition and treat it as a secret, like the challenges' `JWT_SIGNING_SECRET`.
+- **`vm-ctfd` size**: undecided, probably `Standard_D2s_v7` for consistency with `vm-wiki`/`vm-monitor`/`vm-wg-gateway`, not from actual load calculation (CTFd for a one-day event with dozens of teams is lightweight).
+- **Who publishes the event (`state: hidden` → `visible`)**: decide if it's a seed script flag, a button in CTFd's UI (already exists, "Freeze"/native CTF start dates), or both — CTFd already has native CTF `start`/`end`, might not need anything new here beyond configuring them in initial setup.
 
-## Runbook del día del evento
+## Event day runbook
 
-Comandos reales, ya probados contra Azure (2026-08-11), para no tener que reconstruir este flujo
-de memoria ese día.
+Real commands, already tested against Azure (2026-08-11), so you don't have to reconstruct this flow from memory that day.
 
-**Despliegue desde cero** (no existe `vm-ctfd` todavía):
+**Fresh deployment** (`vm-ctfd` doesn't exist yet):
 
 ```bash
 export DOCKERHUB_USER="..."
 export DOCKERHUB_TOKEN="..."
-# yamls/.env.secrets ya tiene que tener el bloque CTFD_* con valores REALES, no changeme_*
+# yamls/.env.secrets must already have the CTFD_* block with REAL values, not changeme_*
 # (CTFD_SECRET_KEY, CTFD_DB_PASSWORD, CTFD_DB_ROOT_PASSWORD, CTFD_PRESET_ADMIN_PASSWORD,
-# CTFD_PRESET_ADMIN_TOKEN, CTFD_EVENT_NAME) -- ver "Riesgos" arriba.
+# CTFD_PRESET_ADMIN_TOKEN, CTFD_EVENT_NAME) -- see "Risks" above.
 
-CTFD_SEED_PUBLISH=1 ./lab-azure.sh deploy-ctfd-vm   # sin esto, los challenges quedan ocultos
+CTFD_SEED_PUBLISH=1 ./lab-azure.sh deploy-ctfd-vm   # without this, challenges stay hidden
 ```
 
-Sin `CTFD_SEED_PUBLISH=1`, los 5 challenges se cargan pero con `state=hidden` — **esto es
-diseño, no un bug**: `/challenges` se ve vacío incluso logueado como admin hasta que se publican
-(ver "Diseño del manifiesto y el seed" arriba, "cargar contenido" vs. "abrir el CTF"). Se
-confundió con un error real en la validación de esta sesión — si vuelve a pasar, no es un
-síntoma de que algo se rompió.
+Without `CTFD_SEED_PUBLISH=1`, the 5 challenges load but with `state=hidden` — **this is by design, not a bug**: `/challenges` looks empty even when logged in as admin until they're published (see "Manifest and seed design" above, "load content" vs. "open the CTF"). It was confused with a real error during this session's validation — if it happens again, it's not a sign something broke.
 
-**Publicar (o volver a publicar) sin recrear la VM**, si ya está desplegada y solo hace falta
-pasar los challenges de oculto a visible (o recargar un cambio en `challenges.yml`/flags):
+**Publish (or republish) without recreating the VM**, if it's already deployed and you just need to change challenges from hidden to visible (or reload a change in `challenges.yml`/flags):
 
 ```bash
 TOKEN="$(grep ^CTFD_PRESET_ADMIN_TOKEN= yamls/.env.secrets | cut -d= -f2-)"
@@ -331,277 +176,129 @@ az vm run-command invoke --resource-group rg-ctf-semana-ingenieria-test --name v
   --query "value[0].message" --output tsv
 ```
 
-Idempotente (match por `name`, no duplica) — seguro de correr más de una vez. Omitir `--publish`
-si se quiere recargar contenido sin tocar la visibilidad actual.
+Idempotent (matches by `name`, no duplication) — safe to run multiple times. Omit `--publish` if you want to reload content without changing current visibility.
 
-**Verificar que responde** (por si el DNS interno no resuelve en el cliente — split-DNS de
-WireGuard no es confiable en Linux, ver `docs/plans/internal-dns.md`):
+**Verify it's responding** (in case internal DNS doesn't resolve on the client — WireGuard split-DNS isn't reliable on Linux, see `docs/plans/internal-dns.md`):
 
 ```bash
-google-chrome http://ctfd.dmz.sabanacorp.internal   # preferido, vía DNS interno
-google-chrome http://<IP privada de vm-ctfd>/challenges   # fallback directo por IP
+google-chrome http://ctfd.dmz.sabanacorp.internal   # preferred, via internal DNS
+google-chrome http://<vm-ctfd private IP>/challenges   # direct fallback via IP
 ```
 
-Login admin: `CTFD_PRESET_ADMIN_EMAIL` / `CTFD_PRESET_ADMIN_PASSWORD` (`yamls/.env.secrets`).
+Admin login: `CTFD_PRESET_ADMIN_EMAIL` / `CTFD_PRESET_ADMIN_PASSWORD` (`yamls/.env.secrets`).
 
-**Estado, si algo se ve raro**:
+**Status, if something looks odd**:
 
 ```bash
-./lab-azure.sh status   # sección "DMZ-VM": vm-ctfd + estado de los 4 contenedores
+./lab-azure.sh status   # "DMZ-VM" section: vm-ctfd + status of the 4 containers
 az vm run-command invoke -g rg-ctf-semana-ingenieria-test -n vm-ctfd \
   --command-id RunShellScript --scripts 'docker compose -f /opt/ctfd/docker-compose.yml logs --tail 100 ctfd' \
   --query "value[0].message" -o tsv
 ```
 
-**Ojo con `--output table`/confiar en el exit code de `az vm run-command invoke`**: no refleja si
-el script remoto falló (ver anotación de abajo, bug 1) — siempre agregar
-`--query "value[0].message" --output tsv` y leer el texto si algo no cuadra.
+**Watch out with `--output table`/relying on `az vm run-command invoke` exit code**: it doesn't reflect if the remote script failed (see note below, bug 1) — always add `--query "value[0].message" --output tsv` and read the text if something doesn't add up.
 
-## Fases propuestas
+## Proposed phases
 
-### F1 — Manifiesto + seed script de challenges
+### Phase 1 — Manifest + challenge seed script
 
-- `challenges/challenges.yml` en `../sabana-corp-CTFd` con las 5 flags actuales.
-- `scripts/seed_challenges.py`, idempotente, contra la API admin de CTFd.
-- Documentar en `../sabana-corp-CTFd/CLAUDE.md` cómo generar el Access Token de admin la primera
-  vez.
+- `challenges/challenges.yml` in `../sabana-corp-CTFd` with the 5 current flags.
+- `scripts/seed_challenges.py`, idempotent, against CTFd's admin API.
+- Document in `../sabana-corp-CTFd/CLAUDE.md` how to generate the admin Access Token the first time.
 
-### F2 — VM real
+### Phase 2 — Real VM
 
-- `deploy-ctfd-vm` en `lab-azure.sh`, `vm-ctfd` en `snet-dmz-vm`, validado end-to-end contra Azure
-  real (mismo listón que wiki/monitor: no se marca "implementado" hasta correr de verdad).
+- `deploy-ctfd-vm` in `lab-azure.sh`, `vm-ctfd` in `snet-dmz-vm`, validated end-to-end against real Azure (same bar as wiki/monitor: not marked "implemented" until actually run).
 
-### F3 — CI de imagen propia
+### Phase 3 — Custom image CI
 
-- Decidir cuenta Docker Hub destino y qué hacer con los 6 workflows heredados rotos.
-- Workflow `push a main` estilo `sabana-corp-network`/`sabana-corp-dmz`.
+- Decide target Docker Hub account and what to do with the 6 broken inherited workflows.
+- `push to main` workflow like `sabana-corp-network`/`sabana-corp-dmz`.
 
-### F4 — Operación del evento
+### Phase 4 — Event operations
 
-- Publicar/despublicar challenges, `export_ctf` antes de un `down`, y (si se decide) alinear
-  nombre de equipo CTFd ↔ `teamN` como instrucción del evento, no como control técnico.
+- Publish/unpublish challenges, `export_ctf` before a `down`, and (if decided) align CTFd team name ↔ `teamN` as an event instruction, not a technical control.
 
-**F1 es el mínimo para poder cargar las flags reales sin clicks manuales.** F2 es lo que lo hace
-desplegable. F3/F4 son higiene operativa, no bloquean un primer evento de prueba.
+**Phase 1 is the minimum to load real flags without manual clicks.** Phase 2 is what makes it deployable. Phase 3/4 are operational hygiene, they don't block a first test event.
 
-## Anotación (2026-08-10) — F1 y parte de F3 implementadas del lado de `../sabana-corp-CTFd`
+## Note (2026-08-10) — Phase 1 and part of Phase 3 implemented in `../sabana-corp-CTFd`
 
-Sesión de implementación en `../sabana-corp-CTFd` (no en este repo). Nada corrido contra Azure
-real todavía — todo probado en local (dry-run del seed, `yaml`/`docker compose config` válidos).
-Para continuar desde este lado (`sabana-corp-cloud`), esto es lo que ya existe y con qué contrato:
+Implementation session in `../sabana-corp-CTFd` (not in this repo). Nothing run against real Azure yet — all tested locally (dry-run of seed, `yaml`/`docker compose config` valid). To continue from this side (`sabana-corp-cloud`), here's what already exists and under what contract:
 
-**F1 — manifiesto + seed script (hecho, coincide con el diseño de arriba):**
+**Phase 1 — manifest + seed script (done, matches the design above):**
 
-- `../sabana-corp-CTFd/challenges/challenges.yml` — las 5 flags de la tabla de este documento, una
-  entrada por challenge, `flag_env: FLAG_*` (nunca el valor). `value`/`description` son
-  placeholders puestos en esta sesión — pendiente que el organizador del evento los ajuste.
-- `../sabana-corp-CTFd/scripts/seed_challenges.py` — idempotente (match por `name`/`challenge_id`
-  contra `/api/v1/challenges` y `/api/v1/flags`), valida que **todas** las `FLAG_*` del manifiesto
-  estén en el entorno antes de llamar a la API (aborta sin crear nada si falta alguna, lista solo
-  los nombres). Dos formas de inyectar las flags: variables ya exportadas en el proceso, o
-  `--env-file <ruta>` (hace `setdefault`, no pisa lo ya exportado) — pensado exactamente para
-  apuntarlo a `yamls/.env.secrets` de este repo. Flags propias: `--dry-run` (valida sin llamar a la
-  API), `--publish` (además marca todo `visible`).
-- `../sabana-corp-CTFd/scripts/requirements.txt` — `requests` + `PyYAML`, separado del
-  `requirements.txt` de la app porque el script no corre dentro del contenedor de CTFd.
-- Requiere `CTFD_URL` + `CTFD_API_TOKEN` en el entorno (no en el `--env-file` de flags, aunque el
-  loader los aceptaría igual si estuvieran ahí). **Automatizado 2026-08-10** (ver anotación al
-  final): `create_ctfd_vm()` pasa `CTFD_URL=http://localhost` (corre en el host de `vm-ctfd`) y
-  `CTFD_API_TOKEN=$CTFD_PRESET_ADMIN_TOKEN` — ya no hace falta login manual → Settings → Access
-  Tokens.
+- `../sabana-corp-CTFd/challenges/challenges.yml` — the 5 flags from this document's table, one entry per challenge, `flag_env: FLAG_*` (never the value). `value`/`description` are placeholders set in this session — pending for the event organizer to adjust.
+- `../sabana-corp-CTFd/scripts/seed_challenges.py` — idempotent (match by `name`/`challenge_id` against `/api/v1/challenges` and `/api/v1/flags`), validates that **all** `FLAG_*` from the manifest are in the environment before calling the API (aborts without creating anything if any is missing, lists only the names). Two ways to inject flags: variables already exported in the process, or `--env-file <path>` (does `setdefault`, doesn't override what's already there) — designed exactly to point at `yamls/.env.secrets` in this repo. Own flags: `--dry-run` (validates without calling the API), `--publish` (also marks everything `visible`).
+- `../sabana-corp-CTFd/scripts/requirements.txt` — `requests` + `PyYAML`, separate from the app's `requirements.txt` because the script doesn't run inside the CTFd container.
+- Requires `CTFD_URL` + `CTFD_API_TOKEN` in the environment (not in the `--env-file` of flags, though the loader would accept them there). **Automated 2026-08-10** (see note at the end): `create_ctfd_vm()` passes `CTFD_URL=http://localhost` (runs on the `vm-ctfd` host) and `CTFD_API_TOKEN=$CTFD_PRESET_ADMIN_TOKEN` — no need for manual login → Settings → Access Tokens anymore.
 
-**Parte de F3 — CI de imagen propia (hecho, decisión de cuenta Docker Hub sigue pendiente de tu lado):**
+**Part of Phase 3 — custom image CI (done, Docker Hub account decision still pending on your side):**
 
-- Los 6 workflows heredados rotos (`mariadb.yml`, `mysql.yml`, `mysql8.yml`, `postgres.yml`,
-  `sqlite.yml`, `verify-themes.yml`) y el `docker-build.yml` original (gated a `release: published`)
-  fueron **eliminados**.
-- `../sabana-corp-CTFd/.github/workflows/deploy.yml` — nuevo, `on: push` a `main` +
-  `workflow_dispatch`, build+push `linux/amd64` a `<DOCKERHUB_USERNAME>/sabana-corp-ctfd:latest` y
-  `:<sha>`. **Requiere que le inyectes los secrets de repo `DOCKERHUB_USERNAME`/`DOCKERHUB_TOKEN`**
-  en GitHub — hoy el workflow existe pero fallaría en el paso de login porque esos secrets no están
-  configurados. Nombre de imagen fijo `sabana-corp-ctfd` bajo el namespace que sea `DOCKERHUB_USERNAME`
-  (la decisión pendiente de "en qué cuenta publicar" ahora se resuelve solo con qué cuenta pongas
-  en ese secret, no hay más código que tocar).
+- The 6 broken inherited workflows (`mariadb.yml`, `mysql.yml`, `mysql8.yml`, `postgres.yml`, `sqlite.yml`, `verify-themes.yml`) and the original `docker-build.yml` (gated to `release: published`) were **removed**.
+- `../sabana-corp-CTFd/.github/workflows/deploy.yml` — new, `on: push` to `main` + `workflow_dispatch`, build+push `linux/amd64` to `<DOCKERHUB_USERNAME>/sabana-corp-ctfd:latest` and `:<sha>`. **Requires you to inject the `DOCKERHUB_USERNAME`/`DOCKERHUB_TOKEN` repo secrets** on GitHub — today the workflow exists but would fail at the login step because those secrets aren't configured. Fixed image name `sabana-corp-ctfd` under whatever namespace `DOCKERHUB_USERNAME` is (the pending decision of "which account to publish to" now resolves itself based on what account you put in that secret, no more code to change).
 
-**Bonus fuera del alcance original del plan, útil para F2:**
+**Bonus outside the original plan scope, useful for Phase 2:**
 
-- `../sabana-corp-CTFd/docker-compose.prod.yml` — variante de producción del compose de CTFd: hace
-  `pull` de `${DOCKERHUB_IMAGE}:${IMAGE_TAG}` (la imagen que publica `deploy.yml`) en vez de
-  `build: .`, y no monta el código fuente como volumen. Es exactamente lo que `deploy-ctfd-vm`
-  debería copiar/generar en `vm-ctfd` según el diseño de "Integración futura con `lab-azure.sh`" de
-  arriba.
-- `../sabana-corp-CTFd/.env.production.example` — plantilla de las variables que ese compose
-  necesita (`DOCKERHUB_IMAGE`, `SECRET_KEY`, `DB_*`, `TRUSTED_HOSTS`, `PRESET_ADMIN_*`, etc.).
-  Mapea 1:1 a lo que tendría que salir de un futuro bloque `CTFD_*` en `yamls/.env.secrets`
-  (mencionado en "Integración futura con `lab-azure.sh`" arriba) — ese bloque todavía no existe en
-  `yamls/.env.secrets.example` de este repo.
+- `../sabana-corp-CTFd/docker-compose.prod.yml` — production variant of CTFd's compose: does `pull` of `${DOCKERHUB_IMAGE}:${IMAGE_TAG}` (the image published by `deploy.yml`) instead of `build: .`, and doesn't mount source code as a volume. It's exactly what `deploy-ctfd-vm` should copy/generate into `vm-ctfd` according to the design of "Future integration with `lab-azure.sh`" above.
+- `../sabana-corp-CTFd/.env.production.example` — template for the variables that compose needs (`DOCKERHUB_IMAGE`, `SECRET_KEY`, `DB_*`, `TRUSTED_HOSTS`, `PRESET_ADMIN_*`, etc.). Maps 1:1 to what should come out of a future `CTFD_*` block in `yamls/.env.secrets` (mentioned in "Future integration with `lab-azure.sh`" above) — that block doesn't yet exist in `yamls/.env.secrets.example` of this repo.
 
-**Qué falta para que F2 se pueda ejecutar (todo del lado de este repo, `sabana-corp-cloud`):**
+**What's needed for Phase 2 to run (all on this repo side, `sabana-corp-cloud`):**
 
-1. Añadir un bloque `CTFD_*` a `yamls/.env.secrets.example` (puerto, `SECRET_KEY`, credenciales de
-   DB, `DOCKERHUB_IMAGE`) siguiendo el formato de `.env.production.example` de arriba.
-2. `deploy-ctfd-vm` en `lab-azure.sh`: crear `vm-ctfd` en `snet-dmz-vm`, cloud-init con Docker,
-   copiar `docker-compose.prod.yml` + `.env` generado desde `yamls/.env.secrets`, `docker compose
-   up -d` vía `az vm run-command invoke` (mismo patrón que `deploy-wiki-vm`/`deploy-monitor-vm`).
-3. Al final de ese despliegue, invocar `seed_challenges.py --env-file yamls/.env.secrets --publish`
-   (o sin `--publish` si el evento no arranca todavía) contra la IP privada de `vm-ctfd` — requiere
-   resolver primero cómo se obtiene `CTFD_API_TOKEN` sin intervención manual (punto abierto de F1
-   arriba) o aceptar que ese paso sigue siendo manual.
-4. Configurar los secrets `DOCKERHUB_USERNAME`/`DOCKERHUB_TOKEN` en el repo de GitHub de
-   `sabana-corp-CTFd` para que `deploy.yml` publique de verdad.
+1. Add a `CTFD_*` block to `yamls/.env.secrets.example` (port, `SECRET_KEY`, DB credentials, `DOCKERHUB_IMAGE`) following the format of `.env.production.example` above.
+2. `deploy-ctfd-vm` in `lab-azure.sh`: create `vm-ctfd` in `snet-dmz-vm`, cloud-init with Docker, copy `docker-compose.prod.yml` + `.env` generated from `yamls/.env.secrets`, `docker compose up -d` via `az vm run-command invoke` (same pattern as `deploy-wiki-vm`/`deploy-monitor-vm`).
+3. At the end of that deployment, invoke `seed_challenges.py --env-file yamls/.env.secrets --publish` (or without `--publish` if the event hasn't started yet) against `vm-ctfd`'s private IP — requires resolving first how to get `CTFD_API_TOKEN` without manual intervention (open point from Phase 1 above) or accept that this step stays manual.
+4. Configure the `DOCKERHUB_USERNAME`/`DOCKERHUB_TOKEN` secrets in the `sabana-corp-CTFd` GitHub repo so that `deploy.yml` publishes for real.
 
-## Anotación (2026-08-10) — F2 escrita del lado de `sabana-corp-cloud`, no corrida contra Azure
+## Note (2026-08-10) — Phase 2 written in `sabana-corp-cloud`, not yet tested against Azure
 
-Sesión de implementación en este repo, cerrando los 4 puntos de "Qué falta para que F2 se pueda
-ejecutar" de arriba (excepto el 4, que es del lado del repo `sabana-corp-CTFd`/GitHub, fuera de
-este). Todo probado localmente (render de `yamls/generated/ctfd/docker-compose.yml` con
-`envsubst`, validado como YAML) — **nada desplegado contra Azure real todavía**, así que sigue sin
-haber `vm-ctfd`.
+Implementation session in this repo, closing the 4 points of "What's needed for Phase 2 to run" above (except point 4, which is on the `sabana-corp-CTFd`/GitHub side, outside this repo). Everything tested locally (`yamls/generated/ctfd/docker-compose.yml` render with `envsubst`, validated as YAML) — **nothing deployed against real Azure yet**, so `vm-ctfd` still doesn't exist.
 
-**Archivos nuevos:**
+**New files:**
 
-- `yamls/templates/ctfd-compose.yml.tpl` — adaptado de
-  `../sabana-corp-CTFd/docker-compose.prod.yml` (nginx + ctfd/gunicorn + MariaDB + Redis), sin los
-  defaults `${VAR:-default}` de docker-compose (`envsubst` no los entiende — se quitaron y los
-  defaults ahora viven en el generador).
-- `yamls/ctfd-vm/cloud-init.yaml` — mismo cloud-init que `yamls/wiki-vm/cloud-init.yaml` (Docker
-  Engine + plugin compose).
-- `yamls/ctfd-vm/conf/nginx/http.conf` — vendored tal cual desde
-  `../sabana-corp-CTFd/conf/nginx/http.conf` (estático, sin variables).
-- `yamls/generate-ctfd-vm.sh` — genera `yamls/generated/ctfd/{docker-compose.yml,
-  conf/nginx/http.conf}`. A diferencia de `generate-wiki-vm.sh` (secretos literales), lee el
-  bloque `CTFD_*` de `yamls/.env.secrets` — mismo mecanismo que `generate-team.sh`. Imagen
-  resuelta como `${DOCKERHUB_USER}/sabana-corp-ctfd:${CTFD_IMAGE_TAG:-latest}`.
+- `yamls/templates/ctfd-compose.yml.tpl` — adapted from `../sabana-corp-CTFd/docker-compose.prod.yml` (nginx + ctfd/gunicorn + MariaDB + Redis), without docker-compose's `${VAR:-default}` defaults (`envsubst` doesn't understand them — they were removed and defaults now live in the generator).
+- `yamls/ctfd-vm/cloud-init.yaml` — same cloud-init as `yamls/wiki-vm/cloud-init.yaml` (Docker Engine + compose plugin).
+- `yamls/ctfd-vm/conf/nginx/http.conf` — vendored exactly from `../sabana-corp-CTFd/conf/nginx/http.conf` (static, no variables).
+- `yamls/generate-ctfd-vm.sh` — generates `yamls/generated/ctfd/{docker-compose.yml, conf/nginx/http.conf}`. Unlike `generate-wiki-vm.sh` (literal secrets), reads the `CTFD_*` block from `yamls/.env.secrets` — same mechanism as `generate-team.sh`. Image resolved as `${DOCKERHUB_USER}/sabana-corp-ctfd:${CTFD_IMAGE_TAG:-latest}`.
 
-**Archivos editados:**
+**Edited files:**
 
-- `yamls/.env.secrets.example` — nuevo bloque `CTFD_*` (`CTFD_SECRET_KEY`, `CTFD_DB_NAME`,
-  `CTFD_DB_USER`, `CTFD_DB_PASSWORD`, `CTFD_DB_ROOT_PASSWORD`, `CTFD_PRESET_ADMIN_*`). El
-  `yamls/.env.secrets` real (gitignored) del operador también recibió el bloque, con los mismos
-  placeholders `changeme_*` — hay que rellenarlo con valores reales antes de desplegar.
-- `yamls/generate-dns-hosts.sh` — el caso `dmz` y `all-from-azure` ahora también resuelven la IP
-  de `vm-ctfd` (si existe) y registran `ctfd.dmz.${LAB_DOMAIN}` (alias `scoreboard.dmz`), mismo
-  patrón que `wiki.dmz`.
-- `lab-azure.sh` — nueva función `create_ctfd_vm()` (mismo patrón que `create_wiki_vm()`: crea
-  `vm-ctfd` en `snet-dmz-vm`, espera Docker via cloud-init, empuja el bundle tar+base64 vía
-  `run-command`, `docker compose up -d`, registra DNS). Comando nuevo `deploy-ctfd-vm`, sección
-  nueva en `status()`, usage string y comentario de cabecera actualizados.
+- `yamls/.env.secrets.example` — new `CTFD_*` block (`CTFD_SECRET_KEY`, `CTFD_DB_NAME`, `CTFD_DB_USER`, `CTFD_DB_PASSWORD`, `CTFD_DB_ROOT_PASSWORD`, `CTFD_PRESET_ADMIN_*`). The real `yamls/.env.secrets` (gitignored) also received the block, with the same `changeme_*` placeholders — needs to be filled with real values before deployment.
+- `yamls/generate-dns-hosts.sh` — the `dmz` and `all-from-azure` cases now also resolve `vm-ctfd`'s IP (if it exists) and register `ctfd.dmz.${LAB_DOMAIN}` (alias `scoreboard.dmz`), same pattern as `wiki.dmz`.
+- `lab-azure.sh` — new `create_ctfd_vm()` function (same pattern as `create_wiki_vm()`: creates `vm-ctfd` in `snet-dmz-vm`, waits for Docker via cloud-init, pushes the tar+base64 bundle via `run-command`, `docker compose up -d`, registers DNS). New `deploy-ctfd-vm` command, new section in `status()`, usage string and header comment updated.
 
-**Qué falta para correr esto de verdad (no resuelto en esta sesión):**
+**What's needed to run this for real (not resolved in this session):**
 
-1. Rellenar `yamls/.env.secrets` (bloque `CTFD_*`) con valores reales, no los placeholders
-   `changeme_*` (incluye ahora `CTFD_PRESET_ADMIN_TOKEN`, `CTFD_EVENT_NAME` — ver anotación
-   siguiente).
-2. Confirmar que la imagen `${DOCKERHUB_USER}/sabana-corp-ctfd:latest` ya existe en Docker Hub
-   (el usuario indicó que sí, bajo su cuenta) y que `DOCKERHUB_USER` apunta a esa cuenta al correr
-   `./lab-azure.sh deploy-ctfd-vm`.
-3. Correr `./lab-azure.sh deploy-ctfd-vm` contra Azure real y validar end-to-end (arranque de los
-   4 servicios, `/setup` + Access Token + carga de challenges ya automatizados, ver anotación
-   siguiente — falta la corrida real) antes de marcar F2 como implementada.
-4. Punto 4 de "Qué falta" original (secrets `DOCKERHUB_USERNAME`/`DOCKERHUB_TOKEN` en el repo de
-   GitHub de `sabana-corp-CTFd`) sigue pendiente y es independiente de este repo.
+1. Fill `yamls/.env.secrets` (block `CTFD_*`) with real values, not `changeme_*` placeholders (now includes `CTFD_PRESET_ADMIN_TOKEN`, `CTFD_EVENT_NAME` — see next note).
+2. Confirm that the image `${DOCKERHUB_USER}/sabana-corp-ctfd:latest` already exists on Docker Hub (user indicated yes, under their account) and that `DOCKERHUB_USER` points to that account when running `./lab-azure.sh deploy-ctfd-vm`.
+3. Run `./lab-azure.sh deploy-ctfd-vm` against real Azure and validate end-to-end (startup of the 4 services, `/setup` + Access Token + challenge loading already automated, see next note — real run still pending) before marking Phase 2 as implemented.
+4. Point 4 of the original "What's needed" (secrets `DOCKERHUB_USERNAME`/`DOCKERHUB_TOKEN` in the `sabana-corp-CTFd` GitHub repo) is still pending and independent of this repo.
 
-## Anotación (2026-08-10, continuación) — automatización completa del primer arranque (setup + token admin)
+## Note (2026-08-10, continued) — full automation of first boot (setup + admin token)
 
-Mismo día, misma sesión: se cerró el hueco marcado arriba como manual (login admin → Settings →
-Access Tokens) y además se encontró y cerró un hueco más grande que no estaba documentado —
-CTFd bloquea *toda* request, incluida la API, hasta que el wizard de `/setup` se completa (ver
-`needs_setup()` en `CTFd/utils/initialization/__init__.py`), así que un token de admin por sí solo
-no alcanza para correr `seed_challenges.py` sin intervención humana.
+Same day, same session: the gap marked above as manual (admin login → Settings → Access Tokens) was closed, and a larger undocumented gap was found and closed — CTFd blocks *all* requests (including API) until the `/setup` wizard completes (see `needs_setup()` in `CTFd/utils/initialization/__init__.py`), so an admin token alone isn't enough to run `seed_challenges.py` without human intervention.
 
-**Archivos nuevos:**
+**New files:**
 
-- `../sabana-corp-CTFd/scripts/seed_setup.py` — replica la lógica de la vista `/setup` (crear
-  admin, fijar `user_mode`/visibilidad/nombre del evento, marcar `config['setup']=true`) directo
-  contra los modelos de CTFd, sin pasar por el form HTML (que exige un nonce CSRF atado a la
-  sesión del navegador — automatizarlo con un cliente HTTP genérico hubiera significado scrapear
-  ese nonce del HTML, fragil). Por eso corre *dentro* del contenedor `ctfd`
-  (`docker compose exec -T ctfd python3 - < seed/seed_setup.py`), no desde el host de la VM como
-  `seed_challenges.py` — necesita el paquete `CTFd` instalado y contexto de Flask/DB, no solo
-  `requests`/`PyYAML`. Idempotente (`if is_setup(): return`), y si el admin que crea
-  `PRESET_ADMIN_TOKEN` ya existe (mismo email), no lo duplica.
+- `../sabana-corp-CTFd/scripts/seed_setup.py` — replicates the `/setup` view logic (create admin, set `user_mode`/visibility/event name, mark `config['setup']=true`) directly against CTFd models, without going through the HTML form (which requires a CSRF nonce tied to the browser session — automating it with a generic HTTP client would have meant scraping that nonce from HTML, fragile). That's why it runs *inside* the `ctfd` container (`docker compose exec -T ctfd python3 - < seed/seed_setup.py`), not from the VM host like `seed_challenges.py` — needs the CTFd package installed and Flask/DB context, not just `requests`/`PyYAML`. Idempotent (`if is_setup(): return`), and if the admin created by `PRESET_ADMIN_TOKEN` already exists (same email), it doesn't duplicate.
 
-**Archivos editados (`sabana-corp-cloud`):**
+**Edited files (`sabana-corp-cloud`):**
 
-- `yamls/templates/ctfd-compose.yml.tpl` — agregado `PRESET_ADMIN_TOKEN` (CTFd lo acepta como
-  Access Token de un admin que crea al vuelo, ver `CTFd/utils/security/auth.py`) y
-  `CTFD_EVENT_NAME`/`CTFD_EVENT_DESCRIPTION`/`CTFD_TEAM_SIZE` (no son variables nativas de CTFd,
-  las lee `seed_setup.py`) al `environment` del servicio `ctfd`.
-- `yamls/generate-ctfd-vm.sh` — `CTFD_PRESET_ADMIN_NAME/EMAIL/PASSWORD` pasaron de opcionales a
-  obligatorias (el seed automático depende de que exista un admin válido), se agregó
-  `CTFD_PRESET_ADMIN_TOKEN` (obligatoria) y `CTFD_EVENT_NAME` (obligatoria)/`CTFD_EVENT_DESCRIPTION`/`CTFD_TEAM_SIZE`
-  (opcionales); ahora también vendorea `seed_setup.py` desde `$CTFD_REPO_DIR` junto a los otros
-  archivos de `seed/`.
-- `yamls/.env.secrets(.example)` — nuevas variables `CTFD_PRESET_ADMIN_TOKEN`,
-  `CTFD_EVENT_NAME`/`CTFD_EVENT_DESCRIPTION`/`CTFD_TEAM_SIZE`. **Ojo con comillas**: `.env.secrets`
-  se carga con `source` en bash (no es un parser `.env` real) — un valor con espacios como
-  `CTFD_EVENT_NAME` tiene que ir entre comillas (`CTFD_EVENT_NAME="Sabana Corp CTF"`) o `source`
-  rompe interpretando el resto como un comando. Ya corregido en ambos archivos; tenerlo en cuenta
-  si se agregan más variables con espacios a este archivo en el futuro.
-- `lab-azure.sh` — `create_ctfd_vm()` ahora corre, en orden, `seed_setup.py` (dentro del
-  contenedor) y después `seed_challenges.py` (desde el host de la VM), entre el chequeo de "CTFd
-  responde" y el mensaje final. Cloud-init de `vm-ctfd` gana `python3-pip` (ya estaba, sin cambios
-  en esta pasada).
+- `yamls/templates/ctfd-compose.yml.tpl` — added `PRESET_ADMIN_TOKEN` (CTFd accepts it as an Access Token for an admin it creates on-the-fly, see `CTFd/utils/security/auth.py`) and `CTFD_EVENT_NAME`/`CTFD_EVENT_DESCRIPTION`/`CTFD_TEAM_SIZE` (not CTFd's native variables, read by `seed_setup.py`) to the `ctfd` service's `environment`.
+- `yamls/generate-ctfd-vm.sh` — `CTFD_PRESET_ADMIN_NAME/EMAIL/PASSWORD` changed from optional to required (automatic seed depends on a valid admin existing), added `CTFD_PRESET_ADMIN_TOKEN` (required) and `CTFD_EVENT_NAME` (required)/`CTFD_EVENT_DESCRIPTION`/`CTFD_TEAM_SIZE` (optional); also now vendors `seed_setup.py` from `$CTFD_REPO_DIR` alongside other `seed/` files.
+- `yamls/.env.secrets(.example)` — new variables `CTFD_PRESET_ADMIN_TOKEN`, `CTFD_EVENT_NAME`/`CTFD_EVENT_DESCRIPTION`/`CTFD_TEAM_SIZE`. **Watch the quotes**: `.env.secrets` is sourced with `source` in bash (not a real `.env` parser) — a value with spaces like `CTFD_EVENT_NAME` must be quoted (`CTFD_EVENT_NAME="Sabana Corp CTF"`) or `source` breaks interpreting the rest as a command. Already fixed in both files; keep this in mind if adding more space-containing variables to this file in the future.
+- `lab-azure.sh` — `create_ctfd_vm()` now runs, in order, `seed_setup.py` (inside the container) and then `seed_challenges.py` (from the VM host), between the "CTFd responds" check and the final message. Cloud-init for `vm-ctfd` gains `python3-pip` (already there, no changes this time).
 
-**Validado localmente**: `./yamls/generate-ctfd-vm.sh` corre limpio con `DOCKERHUB_USER` de
-prueba, el `docker-compose.yml` resultante es YAML válido con las 4 variables nuevas resueltas, y
-`seed_setup.py` vendored pasa un chequeo de sintaxis. **Nada corrido contra Azure real** — sigue
-sin haber `vm-ctfd`, sigue siendo el paso 3 de la lista de arriba.
+**Validated locally**: `./yamls/generate-ctfd-vm.sh` runs clean with test `DOCKERHUB_USER`, the resulting `docker-compose.yml` is valid YAML with the 4 new variables resolved, and vendored `seed_setup.py` passes syntax check. **Nothing run against real Azure** — `vm-ctfd` still doesn't exist, still step 3 from the list above.
 
-## Anotación (2026-08-11) — F2 validada end-to-end contra Azure real, tres bugs encontrados y corregidos
+## Note (2026-08-11) — Phase 2 validated end-to-end against real Azure, three bugs found and fixed
 
-`./lab-azure.sh deploy-ctfd-vm` se corrió contra el lab real. La primera corrida terminó con exit
-0 y el mensaje final de "éxito" — pero **eso no significaba que hubiera funcionado**: verificación
-manual post-deploy (leer `value[0].message` de cada `run-command invoke` directamente en vez de
-confiar en `--output table`/el exit code de `az`) encontró dos bugs reales, ambos corregidos y
-re-validados contra la misma VM (sin recrearla, ver memoria de proyecto sobre aplicar en caliente):
+`./lab-azure.sh deploy-ctfd-vm` ran against the real lab. First run finished with exit 0 and a "success" message — but **that didn't mean it actually worked**: post-deploy manual verification (reading `value[0].message` from each `run-command invoke` directly instead of trusting `--output table`/`az` exit code) found two real bugs, both fixed and re-validated against the same VM (without recreating it, see project memory on live-applying):
 
-1. **`az vm run-command invoke` no propaga el exit code del script remoto.** Confirmado con un
-   `--scripts "exit 1"` de control: `az` devuelve exit 0 y `"code":
-   "ProvisioningState/succeeded"` igual. El resultado real (éxito o traceback) vive solo en el
-   texto de `value[0].message`. La primera versión de `create_ctfd_vm()` confiaba en el exit code
-   de `az` para el loop de "¿CTFd ya responde?" y usaba `--output table` (que no mostró nada útil)
-   para invocar `seed_setup.py`/`seed_challenges.py` — ninguno de los dos hubiera hecho fallar el
-   deploy si el script remoto tronaba. Corregido: **todo** `run-command invoke` cuyo resultado
-   importa ahora captura `--query "value[0].message" --output tsv`, lo imprime siempre (nada de
-   salida silenciosa) y decide éxito/error inspeccionando el texto (código HTTP para el chequeo de
-   salud, un marcador de éxito conocido para cada script) — no el exit code de `az`. Esta regla
-   aplica a cualquier `run-command` nuevo que se agregue más adelante, no solo a los de CTFd.
-2. **`TRUSTED_HOSTS` no incluía `localhost`.** `seed_challenges.py` y el chequeo de salud le pegan
-   a CTFd por `http://localhost` (dentro de `vm-ctfd`, vía nginx), pero `TRUSTED_HOSTS` solo traía
-   `ctfd.dmz.sabanacorp.internal` — Werkzeug devolvía `500 SecurityError: Host 'localhost' is not
-   trusted` en cualquier request con ese Host header (ver `CTFd/__init__.py:create_url_adapter`).
-   `seed_setup.py` no se vio afectado (no usa HTTP, escribe directo contra los modelos), pero
-   `seed_challenges.py` sí — la carga de challenges de la primera corrida **nunca pasó de verdad**,
-   aunque el deploy había reportado éxito. Corregido en `generate-ctfd-vm.sh`:
-   `TRUSTED_HOSTS="ctfd.dmz.${LAB_DOMAIN},localhost"` (CTFd separa por comas, ver
-   `CTFd/config.py`).
+1. **`az vm run-command invoke` doesn't propagate the remote script's exit code.** Confirmed with a control `--scripts "exit 1"`: `az` returns exit 0 and `"code": "ProvisioningState/succeeded"` anyway. The real result (success or traceback) lives only in the text of `value[0].message`. The first version of `create_ctfd_vm()` relied on `az`'s exit code for the "does CTFd respond?" loop and used `--output table` (which showed nothing useful) to invoke `seed_setup.py`/`seed_challenges.py` — neither would have failed the deployment if the remote script crashed. Fixed: **every** `run-command invoke` whose result matters now captures `--query "value[0].message" --output tsv`, always prints it (no silent output), and decides success/error by inspecting the text (HTTP code for health check, a known success marker for each script) — not `az`'s exit code. This rule applies to any new `run-command` added later, not just CTFd ones.
+2. **`TRUSTED_HOSTS` didn't include `localhost`.** `seed_challenges.py` and the health check hit CTFd at `http://localhost` (inside `vm-ctfd`, via nginx), but `TRUSTED_HOSTS` only had `ctfd.dmz.sabanacorp.internal` — Werkzeug returned `500 SecurityError: Host 'localhost' is not trusted` for any request with that Host header (see `CTFd/__init__.py:create_url_adapter`). `seed_setup.py` wasn't affected (uses no HTTP, writes directly against models), but `seed_challenges.py` was — first run's challenge loading **never actually happened**, though the deployment reported success. Fixed in `generate-ctfd-vm.sh`: `TRUSTED_HOSTS="ctfd.dmz.${LAB_DOMAIN},localhost"` (CTFd uses comma separation, see `CTFd/config.py`).
 
-**Efecto colateral menor, no un bug**: `GET /` devuelve 404 (no 200) porque `seed_setup.py`
-deliberadamente no crea la página `index` que sí crea la vista `/setup` original (se consideró
-innecesaria para el CTF — el flujo real de los participantes es `/challenges`/`/login`, no la
-home). Por eso el chequeo de salud apunta a `/api/v1/challenges` (devuelve 302, no 404) y no a
-`/`.
+**Minor side effect, not a bug**: `GET /` returns 404 (not 200) because `seed_setup.py` deliberately doesn't create the `index` page that the original `/setup` view does (considered unnecessary for the CTF — participants' real flow is `/challenges`/`/login`, not the home). That's why the health check points to `/api/v1/challenges` (returns 302, not 404) instead of `/`.
 
-**Resultado de la corrida real, verificado directamente contra `vm-ctfd` (no solo por los logs del
-deploy)**: los 4 contenedores (`ctfd`, `nginx`, `db`, `cache`) corriendo; `seed_setup.py`
-confirmado idempotente (`CTFd ya esta configurado` en una segunda corrida manual); los 5
-challenges cargados con `state=hidden` y IDs estables entre corridas (`seed_challenges.py`
-confirmado idempotente también); `ctfd.dmz.sabanacorp.internal` resuelve `10.51.0.4` desde
-`dns-check`. **F2 queda validada end-to-end — mismo listón que wiki/monitor.** Pendiente real:
-`.env.secrets` de este operador todavía tiene varios valores `changeme_*` (`CTFD_SECRET_KEY`,
-`CTFD_DB_PASSWORD`, `CTFD_DB_ROOT_PASSWORD`, `CTFD_PRESET_ADMIN_PASSWORD`,
-`CTFD_PRESET_ADMIN_TOKEN`) — esto fue una corrida de prueba, hay que rotarlos a valores reales
-antes del evento real (mismo cuidado que `SECRET_KEY`/`MYSQL_ROOT_PASSWORD` documentado arriba).
+**Real run result, verified directly against `vm-ctfd` (not just deployment logs)**: all 4 containers (`ctfd`, `nginx`, `db`, `cache`) running; `seed_setup.py` confirmed idempotent (`CTFd is already configured` on a second manual run); 5 challenges loaded with `state=hidden` and stable IDs between runs (`seed_challenges.py` also confirmed idempotent); `ctfd.dmz.sabanacorp.internal` resolves to `10.51.0.4` from `dns-check`. **Phase 2 is validated end-to-end — same bar as wiki/monitor.** Real pending item: this operator's `.env.secrets` still has several `changeme_*` values (`CTFD_SECRET_KEY`, `CTFD_DB_PASSWORD`, `CTFD_DB_ROOT_PASSWORD`, `CTFD_PRESET_ADMIN_PASSWORD`, `CTFD_PRESET_ADMIN_TOKEN`) — this was a test run, need to rotate to real values before the actual event (same care as documented for `SECRET_KEY`/`MYSQL_ROOT_PASSWORD` above).
 
-**Tercer bug, encontrado por el usuario navegando de verdad (misma sesión)**: acceder a
-`http://10.51.0.4` directo por IP (en vez del FQDN) también daba `500 SecurityError: Host
-'10.51.0.4' is not trusted` — mismo mecanismo que el bug 2, pero con un Host header distinto.
-Relevante porque el split-DNS de WireGuard **no es confiable en clientes Linux** (ver
-`docs/plans/internal-dns.md`), así que navegar por IP no es un caso de borde raro, es un camino
-real. Corregido: `create_ctfd_vm()` en `lab-azure.sh` ahora obtiene la IP privada de `vm-ctfd`
-inmediatamente después de `az vm create` (antes se pedía más tarde, después de generar el bundle)
-y se la pasa a `generate-ctfd-vm.sh` como `CTFD_VM_IP`, que la suma a `TRUSTED_HOSTS` —
-`ctfd.dmz.${LAB_DOMAIN},localhost,${CTFD_VM_IP}`. Aplicado en caliente sobre la `vm-ctfd` ya viva
-(regenerar bundle + `docker compose up -d`, sin recrear la VM) y verificado con `curl -H 'Host:
-10.51.0.4'` devolviendo 302 en vez de 500.
+**Third bug, found by user actually browsing (same session)**: accessing `http://10.51.0.4` directly by IP (instead of FQDN) also gave `500 SecurityError: Host '10.51.0.4' is not trusted` — same mechanism as bug 2, but with a different Host header. Relevant because WireGuard split-DNS **is not reliable on Linux clients** (see `docs/plans/internal-dns.md`), so accessing by IP isn't a rare edge case, it's a real path. Fixed: `create_ctfd_vm()` in `lab-azure.sh` now gets `vm-ctfd`'s private IP immediately after `az vm create` (before it was requested later, after generating the bundle) and passes it to `generate-ctfd-vm.sh` as `CTFD_VM_IP`, which adds it to `TRUSTED_HOSTS` — `ctfd.dmz.${LAB_DOMAIN},localhost,${CTFD_VM_IP}`. Applied live to the already-running `vm-ctfd` (regenerate bundle + `docker compose up -d`, no VM recreation) and verified with `curl -H 'Host: 10.51.0.4'` returning 302 instead of 500.

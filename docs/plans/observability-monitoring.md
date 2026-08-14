@@ -1,91 +1,89 @@
-# Plan: observabilidad central (Prometheus + Grafana en snet-mgmt)
+# Plan: central observability (Prometheus + Grafana in snet-mgmt)
 
-## Estado
+## Status
 
-**F1 (stack base + descubrimiento) y F2 (reglas de alerta) implementados y validados contra Azure
-real el 2026-08-10.** `./lab-azure.sh deploy-monitor-vm` crea `vm-monitor`; `status` ahora incluye
-su sección. F3 (`restore team/dmz`) y F4 (logs) siguen sin implementar. Ver `yamls/README.md`
-"Observabilidad" para el detalle operativo (rutas de host, gen_targets.py, etc).
+**F1 (base stack + discovery) and F2 (alerting rules) implemented and validated against real Azure
+on 2026-08-10.** `./lab-azure.sh deploy-monitor-vm` creates `vm-monitor`; `status` now includes
+its section. F3 (`restore team/dmz`) and F4 (logs) still not implemented. See `yamls/README.md`
+"Observabilidad" for operational details (host paths, gen_targets.py, etc).
 
-Dos correcciones sobre el diseño original de este documento, descubiertas al desplegar contra
-Azure real:
+Two corrections to the original design of this document, discovered when deploying against
+real Azure:
 
-1. **"Una sola `az container list`" no basta para el estado de control plane.** La sección
-   "Decision de diseño: descubrimiento" de abajo asumía que `instanceView.state` y
-   `containers[0].instanceView.restartCount` venían poblados en `az container list`. No es
-   cierto — es la misma limitación que ya obligó a `print_container_states()` (`lab-azure.sh`) a
-   usar `az container show` por contenedor. El *targeting* del blackbox (IP:puerto, que sí viene
-   en `list`) no se vio afectado; el estado de control plane (señal secundaria "b") se refresca
-   aparte, cada 5 min, paralelizado con `az container show` por contenedor y cacheado — sigue
-   siendo mucho menos agresivo que 93 llamadas/min, y la señal primaria (blackbox) no depende de
-   esto.
-2. **`GatewaySinHandshakes` no se implementó.** Requeriría que la managed identity de
-   `vm-monitor` pudiera invocar `run-command` contra `vm-wg-gateway` (leer `wg show wg0`), un rol
-   más amplio que `Reader` sobre el RG — no se justificó ampliar el alcance de la identidad solo
-   para esta alerta (ver "Riesgos" abajo, ya advertía sobre esto). Igual que `BotColgado` (bloqueada
-   por el health endpoint pendiente en `bot.js`), queda como trabajo futuro.
+1. **"A single `az container list`" is not enough for control plane status.** The
+   "Design decision: discovery" section below assumed that `instanceView.state` and
+   `containers[0].instanceView.restartCount` came populated in `az container list`. That is not
+   true — it is the same limitation that already forced `print_container_states()` (`lab-azure.sh`) to
+   use `az container show` per container. The blackbox *targeting* (IP:port, which does come
+   in `list`) was not affected; control plane status (secondary signal "b") refreshes
+   separately, every 5 min, parallelized with `az container show` per container and cached — it remains
+   much less aggressive than 93 calls/min, and the primary signal (blackbox) does not depend on
+   this.
+2. **`GatewaySinHandshakes` was not implemented.** It would require the managed identity of
+   `vm-monitor` to invoke `run-command` against `vm-wg-gateway` (read `wg show wg0`), a broader role
+   than `Reader` on the RG — it was not justified to expand the identity's scope just
+   for this alert (see "Risks" below, which already warned about this). Like `BotColgado` (blocked
+   by the pending health endpoint in `bot.js`), it remains as future work.
 
-No confundir con `dmz-decoy-monitor` (`sabanacorp-decoy`, perfil `monitor`, puertos 3000/9090 en
-`snet-dmz-shared`): eso es un señuelo del CTF que imita un Grafana/Prometheus y no monitorea
-nada. El stack real de este plan vive en `snet-mgmt` y se llama `vm-monitor`.
+Do not confuse with `dmz-decoy-monitor` (`sabanacorp-decoy`, `monitor` profile, ports 3000/9090 in
+`snet-dmz-shared`): that is a CTF decoy that mimics a Grafana/Prometheus and monitors
+nothing. The real stack of this plan lives in `snet-mgmt` and is called `vm-monitor`.
 
-## Motivación
+## Motivation
 
-Durante el evento hay ~93 endpoints vivos (20 equipos × 4 contenedores + 13 de DMZ + `vm-wiki` +
-`vm-wg-gateway`). Hoy no hay forma de saber que el Reto 1 del equipo 14 lleva 20 minutos caído
-salvo que el equipo 14 se queje. El objetivo de este plan no es "tener métricas bonitas", es
-responder dos preguntas en menos de un minuto:
+During the event there are ~93 live endpoints (20 teams × 4 containers + 13 from DMZ + `vm-wiki` +
+`vm-wg-gateway`). Today there is no way to know that Challenge 1 of team 14 has been down for 20 minutes
+unless team 14 complains. The goal of this plan is not "to have pretty metrics", it is
+to answer two questions in less than a minute:
 
-1. **¿Qué está roto y de quién?** (servicio + equipo, no un promedio agregado)
-2. **¿Basta con reiniciarlo?** (distinguir contenedor caído de servicio colgado de dependencia
-   rota)
+1. **What is broken and whose is it?** (service + team, not an aggregated average)
+2. **Is restarting it enough?** (distinguish a crashed container from a hung service from a broken dependency)
 
-Requisitos:
-- Cero cambios en las imágenes de los retos, salvo una excepción justificada (`xss-bot`, abajo).
-- Descubrimiento automático: `add-team 15` debe aparecer en el dashboard sin editar config.
-- Sin IP pública. Se accede por el túnel admin de WireGuard.
-- Que quepa en la cuota (10 vCPU regionales).
+Requirements:
+- Zero changes to challenge images, except for one justified exception (`xss-bot`, below).
+- Automatic discovery: `add-team 15` should appear on the dashboard without editing config.
+- No public IP. Accessed via the WireGuard admin tunnel.
+- Must fit within quota (10 regional vCPUs).
 
-## Decisión de diseño: sondeo externo (blackbox), no agentes en los contenedores
+## Design decision: external probing (blackbox), no agents in containers
 
-Tres opciones evaluadas:
+Three options evaluated:
 
-**a) Exporters/sidecars en cada container group.** Descartada. Obliga a tocar las 4 plantillas de
-equipo y las 13 de DMZ; son ~93 procesos extra de RAM; y —lo determinante— el exporter queda
-*dentro* de la red del equipo, donde el participante tiene root en `linux-server` tras el Reto 2.
-Puede leerlo, falsearlo, o usarlo para descubrir la existencia y la IP del monitor. En un CTF el
-agente de monitoreo es superficie de ataque, no solo costo. Mismo razonamiento que la decisión de
-"xss-bot es N instancias, no 1 bot compartido" en `CLAUDE.md`.
+**a) Exporters/sidecars in each container group.** Rejected. It requires touching 4 team templates
+and 13 DMZ ones; that is ~93 extra processes of RAM; and —the decisive factor— the exporter ends up
+*inside* the team's network, where the participant has root on `linux-server` after Challenge 2.
+They can read it, falsify it, or use it to discover the existence and IP of the monitor. In a CTF, the
+monitoring agent is attack surface, not just a cost. Same reasoning as the decision that
+"xss-bot is N instances, not 1 shared bot" in `CLAUDE.md`.
 
-**b) Solo control plane de Azure** (`az container list` → `instanceView.state`, `restartCount`).
-Cero intrusión, pero solo dice "el contenedor está Running". Un MariaDB arriba con la base
-corrupta, un webapp que devuelve 500, o el `xss-bot` con Chromium colgado se ven todos verdes.
-Necesaria, pero insuficiente sola.
+**b) Azure control plane only** (`az container list` → `instanceView.state`, `restartCount`).
+Zero intrusion, but it only says "the container is Running". A MariaDB with a corrupted database,
+a webapp returning 500, or an `xss-bot` with Chromium hung all look green.
+Necessary, but insufficient alone.
 
-**c) `blackbox_exporter` desde `snet-mgmt`.** Prometheus prueba TCP/HTTP contra la IP:puerto real
-de cada servicio, desde fuera, exactamente como lo haría el participante. Cero cambios en las
-imágenes.
+**c) `blackbox_exporter` from `snet-mgmt`.** Prometheus probes TCP/HTTP against the real IP:port
+of each service, from outside, exactly as the participant would. Zero changes to images.
 
-**Se eligen (c) como señal primaria y (b) como señal secundaria.** Juntas distinguen los tres
-estados que importan operativamente:
+**We choose (c) as the primary signal and (b) as the secondary signal.** Together they distinguish the three
+states that matter operationally:
 
-| Control plane | Sonda blackbox | Diagnóstico | Acción |
+| Control plane | Blackbox probe | Diagnosis | Action |
 |---|---|---|---|
-| Running | OK | sano | ninguna |
-| Running | falla | servicio colgado o dependencia rota | reiniciar el contenedor |
-| Terminated / restartCount subiendo | falla | crash loop | mirar logs antes de reiniciar |
-| no existe | falla | grupo borrado | redesplegar (`restore`) |
+| Running | OK | healthy | none |
+| Running | fails | hung service or broken dependency | restart container |
+| Terminated / restartCount rising | fails | crash loop | check logs before restarting |
+| does not exist | fails | group deleted | redeploy (`restore`) |
 
-## Decisión de diseño: descubrimiento vía `az container list`, no targets estáticos
+## Design decision: discovery via `az container list`, no static targets
 
-Este es el problema real del plan, no Grafana.
+This is the real problem of the plan, not Grafana.
 
-ACI no da DNS entre container groups (ya documentado en `CLAUDE.md`), así que no hay nombre
-estable que scrapear. Y las IPs privadas **no son estables ante recreación**: si un container
-group se borra y se vuelve a crear, toma otra IP del pool de la subred. Un `targets.yml`
-escrito a mano queda obsoleto al primer restore.
+ACI does not provide DNS between container groups (already documented in `CLAUDE.md`), so there is no
+stable name to scrape. And private IPs **are not stable on recreation**: if a container
+group is deleted and recreated, it gets another IP from the subnet's pool. A manually written `targets.yml`
+becomes obsolete at the first restore.
 
-Solución: `gen-targets.sh` en `vm-monitor`, corriendo cada 60s por systemd timer:
+Solution: `gen-targets.sh` in `vm-monitor`, running every 60s via systemd timer:
 
 ```bash
 az container list -g "$RG" \
@@ -93,100 +91,99 @@ az container list -g "$RG" \
   | jq '...'  > /etc/prometheus/targets/aci.json
 ```
 
-Una sola llamada al control plane para todo el RG (no una por grupo — eso sí se estrellaría con
-rate limits a 93 grupos). Salida en formato `file_sd` de Prometheus, con labels derivados del
-nombre del container group:
+A single call to the control plane for the entire RG (not one per group — that would hit
+rate limits at 93 groups). Output in Prometheus `file_sd` format, with labels derived from the
+container group name:
 
 | Container group | `job` | `team` | `service` |
 |---|---|---|---|
-| `team7-webapp` | `edificio` | `7` | `webapp` |
+| `team7-webapp` | `building` | `7` | `webapp` |
 | `dmz-filesrv` | `dmz` | `-` | `filesrv` |
 | `dmz-decoy-mail` | `dmz-decoy` | `-` | `decoy-mail` |
 
-El mismo script emite las métricas de control plane (estado, `restartCount`) por textfile
-collector — así (b) y (c) salen de la misma pasada y no hace falta un exporter de Azure aparte.
+The same script emits control plane metrics (state, `restartCount`) via textfile
+collector — so both (b) and (c) come from the same pass and no separate Azure exporter is needed.
 
-Autenticación: **managed identity** en `vm-monitor` con rol `Reader` sobre el RG. Sin service
-principal, sin credenciales en disco. Ver "Riesgos" — esa identidad es lo más valioso que hay en
+Authentication: **managed identity** in `vm-monitor` with `Reader` role on the RG. No service
+principal, no credentials on disk. See "Risks" — that identity is the most valuable asset in
 `snet-mgmt`.
 
-## Decisión de diseño: alerta visual en Grafana, sin Alertmanager
+## Design decision: visual alerting in Grafana, no Alertmanager
 
-El staff opera el evento presencialmente con un dashboard en pantalla. No se despliega
-Alertmanager ni notificación a Telegram/Discord/email: sería infraestructura extra, un canal más
-que mantener, y una dependencia de salida a internet para un problema que ya resuelve un monitor
-encendido con alguien mirándolo.
+The staff operates the event in-person with a dashboard on screen. Alertmanager is not deployed
+nor notifications to Telegram/Discord/email: it would be extra infrastructure, another channel to
+maintain, and a dependency on outbound internet for a problem already solved by a monitor
+running with someone watching it.
 
-Consecuencia de diseño, no menor: **el dashboard tiene que ser legible a tres metros de
-distancia**, porque es el único canal de alerta. Nada de gráficas de líneas como panel principal.
-El panel primario es un muro de estado (`Status history` / celdas de color), una fila por equipo,
-una columna por servicio, verde/rojo. Un rojo se ve desde el otro lado del salón; un p95 en una
-gráfica no.
+A significant design consequence: **the dashboard must be readable from three meters away**,
+because it is the only alert channel. No line graphs as the main panel.
+The primary panel is a status wall (`Status history` / colored cells), one row per team,
+one column per service, green/red. A red is visible from the other side of the room; a p95 in a graph is not.
 
-Se usa Grafana Unified Alerting igual, pero solo para el estado visual de la alerta y su historia
-(cuándo empezó, cuánto lleva), sin contact points. Si más adelante el evento se opera a distancia,
-añadir un webhook es una hora de trabajo y no cambia nada de lo anterior.
+Grafana Unified Alerting is still used, but only for the visual alert state and its history
+(when it started, how long it has been), without contact points. If the event is later operated remotely,
+adding a webhook is an hour of work and changes nothing of the above.
 
-## El punto ciego: `xss-bot`
+## The blind spot: `xss-bot`
 
-`bot.js` (repo `sabana-corp-network`) **no escucha en ningún puerto** — el `port: 80` de
-`team-xss-bot.yaml.tpl` es un placeholder que ACI exige para `ipAddress: Private`, y está
-comentado como tal en la plantilla. No hay nada que sondear.
+`bot.js` (repo `sabana-corp-network`) **does not listen on any port** — the `port: 80` in
+`team-xss-bot.yaml.tpl` is a placeholder that ACI requires for `ipAddress: Private`, and is
+commented as such in the template. There is nothing to probe.
 
-Peor: su bucle principal atrapa toda excepción y sigue girando.
+Worse: its main loop catches all exceptions and keeps running.
 
 ```js
 } catch (err) {
-    // La webapp puede no estar lista en el arranque: reintentar en el próximo ciclo.
-    console.error('[bot] Error en el ciclo de polling:', err.message);
+    // The webapp may not be ready on startup: retry in the next cycle.
+    console.error('[bot] Error in polling cycle:', err.message);
 }
 ```
 
-`chromium.launch()` está **fuera** del bucle. Si el navegador muere —que es el modo de falla
-esperado, porque los participantes le lanzan payloads a propósito— cada `visitTicket` lanza,
-el catch lo traga, y el proceso gira indefinidamente sin visitar nada. El proceso nunca sale,
-así que `restartPolicy: OnFailure` no dispara y el control plane reporta `Running` para siempre.
-El Reto 1 está roto y todas las señales están en verde.
+`chromium.launch()` is **outside** the loop. If the browser dies —which is the expected failure mode,
+because participants throw payloads at it on purpose— each `visitTicket` throws,
+the catch swallows it, and the process runs forever without visiting anything. The process never exits,
+so `restartPolicy: OnFailure` never triggers and the control plane reports `Running` forever.
+Challenge 1 is broken and all signals are green.
 
-**Solución: health endpoint en `bot.js`.** Es la única excepción a "no tocar las imágenes", y se
-justifica porque no hay alternativa externa. Un servidor HTTP mínimo (`node:http`, sin
-dependencias nuevas) en el puerto 80 que ya declara la plantilla:
+**Solution: health endpoint in `bot.js`.** This is the only exception to "do not touch images", and it is
+justified because there is no external alternative. A minimal HTTP server (`node:http`, no
+new dependencies) on port 80 that the template already declares:
 
 ```json
 {"ok": true, "last_visit_ts": 1754700000, "last_error": null, "browser_alive": true}
 ```
 
-- `last_visit_ts`: timestamp del último ciclo completado con éxito. La sonda de Prometheus falla
-  si es más viejo que `3 × BOT_VISIT_INTERVAL_SECONDS` (90s por defecto). Eso convierte "el bot
-  hace su trabajo" en una señal medible, que es distinto de "el proceso vive".
-- `browser_alive`: `browser.isConnected()`. Detecta el crash de Chromium directamente.
+- `last_visit_ts`: timestamp of the last successfully completed cycle. The Prometheus probe fails
+  if it is older than `3 × BOT_VISIT_INTERVAL_SECONDS` (90s by default). That converts "the bot
+  is doing its job" into a measurable signal, which is different from "the process is alive".
+- `browser_alive`: `browser.isConnected()`. Detects the Chromium crash directly.
 
-Riesgo de exposición: bajo. El endpoint solo es alcanzable desde `snet-teamN` (su propio equipo)
-y desde el túnel de ese equipo; no revela flags ni el `BOT_SECRET`; y un servicio de salud en la
-red corporativa encaja con el ruido ambiental del escenario. Aun así, no debe reflejar contenido
-de tickets ni cookies.
+Exposure risk: low. The endpoint is only reachable from `snet-teamN` (its own team)
+and from that team's tunnel; it reveals no flags or `BOT_SECRET`; and a health service in the
+corporate network fits with the ambient noise of the scenario. Still, it must not reflect
+ticket contents or cookies.
 
-Cambio complementario recomendado en el mismo PR (independiente del monitoreo, pero es el bug que
-el monitoreo va a destapar): mover `chromium.launch()` dentro del bucle con relanzado si
-`isConnected()` es falso.
+Complementary change recommended in the same PR (independent of monitoring, but is the bug that
+monitoring will expose): move `chromium.launch()` inside the loop with restart if
+`isConnected()` is false.
 
-## Inventario de sondas
+## Probe inventory
 
-Sonda `tcp_connect` salvo donde diga otra cosa. Los decoys se sondean en su puerto principal
-únicamente (son ruido del escenario; que estén arriba importa, medir cada puerto no).
+`tcp_connect` probe except where otherwise noted. Decoys are probed only on their main port
+(they are scenario noise; what matters is that they are up, not measuring every port).
 
-**Por equipo** (`snet-teamN`, `10.60.N.0/24`), ×20:
+**Per team** (`snet-teamN`, `10.60.N.0/24`), ×20:
 
-| Servicio | Puerto | Sonda |
+| Service | Port | Probe |
 |---|---|---|
-| `database` | 3306 | `tcp_connect` (sin auth — no autenticar contra la DB del reto) |
-| `webapp` | 80 | `http_2xx` a `/` (acepta 200/302) |
+| `database` | 3306 | `tcp_connect` (no auth — do not authenticate against the challenge DB) |
+| `webapp` | 80 | `http_2xx` to `/` (accepts 200/302) |
 | `linux-server` | 22 | `ssh_banner` |
-| `xss-bot` | 80 | `http_2xx` a `/health` + frescura de `last_visit_ts` |
+| `xss-bot` | 80 | `http_2xx` to `/health` + freshness of `last_visit_ts` |
 
-**DMZ compartida** (`snet-dmz-shared`, `10.50.0.0/24`):
+**Shared DMZ** (`snet-dmz-shared`, `10.50.0.0/24`):
 
-| Servicio | Puerto | Sonda |
+| Service | Port | Probe |
 |---|---|---|
 | `dmz-filesrv` | 8080 | `http_2xx` |
 | `dmz-parking` | 8080 | `http_2xx` |
@@ -204,93 +201,90 @@ Sonda `tcp_connect` salvo donde diga otra cosa. Los decoys se sondean en su puer
 
 **VMs:**
 
-| Host | Sonda |
+| Host | Probe |
 |---|---|
-| `vm-wiki` (`snet-dmz-vm`) | `http_2xx` a `:80`; además `docker compose ps` vía `az vm run-command` en el script de targets |
-| `vm-wg-gateway` (`snet-wg-gateway`) | `wg show wg0` vía `az vm run-command`: número de peers y antigüedad del último handshake |
-| `vm-monitor` | `node_exporter` local (esta sí es nuestra, aquí un agente no es superficie de ataque) |
+| `vm-wiki` (`snet-dmz-vm`) | `http_2xx` to `:80`; also `docker compose ps` via `az vm run-command` in the targets script |
+| `vm-wg-gateway` (`snet-wg-gateway`) | `wg show wg0` via `az vm run-command`: number of peers and age of last handshake |
+| `vm-monitor` | local `node_exporter` (this one is ours; here an agent is not attack surface) |
 
-Intervalo de scrape: 15s. Con ~95 targets y sondas TCP eso es carga despreciable para una D2s_v7.
+Scrape interval: 15s. With ~95 targets and TCP probes that is negligible load for a D2s_v7.
 
-## Alertas
+## Alerts
 
-Pocas y accionables. Cada una debe tener una acción obvia asociada; si no la tiene, es un panel,
-no una alerta.
+Few and actionable. Each one must have an obvious associated action; if it doesn't, it is a panel,
+not an alert.
 
-| Alerta | Condición | Severidad | Acción |
+| Alert | Condition | Severity | Action |
 |---|---|---|---|
-| `ServicioCaido` | `probe_success == 0` por >60s | crítica | `restore` del servicio |
-| `EdificioCaido` | los 4 servicios de un `team` caídos | crítica | revisar la subred/el pool de IPs del equipo, no los contenedores uno a uno |
-| `CrashLoop` | `restartCount` sube ≥3 en 10 min | crítica | mirar logs **antes** de reiniciar |
-| `BotColgado` | `last_visit_ts` más viejo que 90s, o `browser_alive == false` | crítica | reiniciar `teamN-xss-bot` |
-| `DerivaDeIP` | la IP inyectada en un dependiente ≠ IP actual de su dependencia | crítica | `restore` del dependiente (ver abajo) |
-| `DMZDegradada` | cualquier servicio de DMZ caído | crítica | afecta a **todos** los equipos, prioridad máxima |
-| `DecoyCaido` | un decoy caído >5 min | baja | cosmético, no bloquea ningún reto |
-| `GatewaySinHandshakes` | 0 handshakes en 5 min con peers configurados | crítica | nadie puede entrar al lab |
-| `DnsCaido` | sonda TCP/UDP 53 contra `10.10.0.4` falla | media | nadie resuelve nombres, pero ningún reto se cae (env vars siguen en IP — ver `docs/plans/internal-dns.md` "Resiliencia") |
+| `ServiceDown` | `probe_success == 0` for >60s | critical | `restore` the service |
+| `BuildingDown` | all 4 services of a `team` down | critical | check the subnet/team IP pool, not containers one by one |
+| `CrashLoop` | `restartCount` rises ≥3 in 10 min | critical | check logs **before** restarting |
+| `BotHung` | `last_visit_ts` older than 90s, or `browser_alive == false` | critical | restart `teamN-xss-bot` |
+| `IPDrift` | injected IP in dependent ≠ current IP of its dependency | critical | `restore` the dependent (see below) |
+| `DMZDegraded` | any DMZ service down | critical | affects **all** teams, highest priority |
+| `DecoyDown` | a decoy down >5 min | low | cosmetic, blocks no challenges |
+| `GatewayNoHandshakes` | 0 handshakes in 5 min with configured peers | critical | no one can enter the lab |
+| `DNSDown` | TCP/UDP 53 probe to `10.10.0.4` fails | medium | no one resolves names, but no challenge crashes (env vars still in IP — see `docs/plans/internal-dns.md` "Resilience") |
 
-### La alerta que no existe en ningún stack estándar: `DerivaDeIP`
+### The alert that doesn't exist in any standard stack: `IPDrift`
 
-`deploy_team` resuelve la falta de DNS leyendo la IP de la dependencia y **horneándola con `sed`**
-en el YAML del dependiente antes de desplegarlo: `webapp` lleva dentro la IP de `database`,
-`xss-bot` la de `webapp`. (El wiki vive ahora en una VM con docker-compose, donde la resolución
-de nombres entre servicios es nativa.)
+`deploy_team` solves the lack of DNS by reading the dependency's IP and **baking it with `sed`**
+into the dependent's YAML before deploying it: `webapp` carries the IP of `database` inside,
+`xss-bot` carries `webapp`'s. (The wiki now lives on a VM with docker-compose, where name resolution between services is native.)
 
-Consecuencia: **recrear un container group puede romper en silencio a sus dependientes.** Si
-`team7-database` se recrea y toma otra IP, `team7-webapp` sigue Running, sigue respondiendo 200 en
-`/`, y falla solo al tocar la base — un fallo parcial que ninguna sonda de disponibilidad detecta
-y que se ve verde en el muro.
+Consequence: **recreating a container group can silently break its dependents.** If
+`team7-database` is recreated and gets a different IP, `team7-webapp` keeps Running, keeps responding 200 on
+`/`, and only fails when accessing the database — a partial failure that no availability probe detects
+and that shows green on the wall.
 
-Por eso el script de targets compara, para cada dependiente, la IP que tiene inyectada
-(`az container show --query "containers[0].environmentVariables"` o el YAML generado en
-`yamls/generated/`) contra la IP actual de su dependencia, y exporta
-`sabana_ip_drift{team,service} = 0|1`. Es la alerta más específica de esta arquitectura y la
-única que no sale gratis de Prometheus.
+That is why the targets script compares, for each dependent, the IP it has injected
+(`az container show --query "containers[0].environmentVariables"` or the generated YAML in
+`yamls/generated/`) against its dependency's current IP, and exports
+`sabana_ip_drift{team,service} = 0|1`. This is the most specific alert to this architecture and the
+only one that doesn't come free from Prometheus.
 
-El DNS interno (`docs/plans/internal-dns.md`, implementado) **no reemplaza esta alerta** —
-decisión deliberada de ese plan: las env vars de los retos se quedan en IP a propósito, así que
-`webapp` puede seguir con la IP vieja de `database` aunque el DNS ya sepa la nueva. `DerivaDeIP`
-ahora tiene una hermana barata de calcular con el mismo mecanismo: comparar el registro DNS
-(`dns-check <fqdn>`) contra la IP real de Azure — detecta cuándo la *zona local* quedó desincronizada,
-no cuándo un contenedor quedó con la IP vieja horneada (son dos fallos distintos, con la misma
-forma).
+The internal DNS (`docs/plans/internal-dns.md`, implemented) **does not replace this alert** —
+a deliberate decision of that plan: challenge env vars stay on IP on purpose, so
+`webapp` can keep the old IP of `database` even if DNS already knows the new one. `IPDrift`
+now has a cheap-to-compute sister via the same mechanism: compare the DNS record
+(`dns-check <fqdn>`) against Azure's real IP — detects when the *local zone* gets out of sync,
+not when a container got stuck with the old baked IP (two different failures, same shape).
 
-## Observar no es restaurar: subcomandos `restore`
+## Observing is not restoring: `restore` subcommands
 
-Un dashboard que detecta pero no arregla deja al operador improvisando `az container create` a
-mano durante el evento. Falta en `lab-azure.sh`:
+A dashboard that detects but does not fix leaves the operator improvising `az container create` by hand during the event. Missing from `lab-azure.sh`:
 
 ```bash
-./lab-azure.sh restore team <N> <servicio>   # database | webapp | linux-server | xss-bot
-./lab-azure.sh restore dmz <servicio>
+./lab-azure.sh restore team <N> <service>   # database | webapp | linux-server | xss-bot
+./lab-azure.sh restore dmz <service>
 ```
 
-Semántica, en orden:
+Semantics, in order:
 
-1. `az container restart` si el grupo existe y no está en crash loop (rápido, conserva la IP).
-2. Si no existe o el restart falla: regenerar el YAML y `az container create` (esto **puede**
-   cambiar la IP).
-3. **Siempre, al final: re-resolver e inyectar las IPs de las dependencias hacia abajo.** Restaurar
-   `database` implica redesplegar `webapp`; restaurar `webapp` implica redesplegar `xss-bot`. Este
-   paso es lo que hace que el comando sea correcto y no solo cómodo, y es la contraparte directa
-   de la alerta `DerivaDeIP`.
+1. `az container restart` if the group exists and is not in a crash loop (fast, preserves the IP).
+2. If it doesn't exist or restart fails: regenerate the YAML and `az container create` (this **can**
+   change the IP).
+3. **Always, at the end: re-resolve and re-inject dependency IPs downstream.** Restoring
+   `database` means redeploying `webapp`; restoring `webapp` means redeploying `xss-bot`. This
+   step is what makes the command correct and not just convenient, and it is the direct counterpart
+   of the `IPDrift` alert.
 
-Reutiliza `deploy_team_workload` y la lógica de inyección de IP que ya existen; no es código nuevo,
-es exponer lo que ya hace `add-team` a nivel de un solo servicio.
+It reuses `deploy_team_workload` and the IP injection logic that already exist; it is not new code,
+it is exposing what `add-team` already does at the level of a single service.
 
-## Acceso
+## Access
 
-Grafana en `10.99.0.x:3000`, **sin IP pública**. Se llega por el túnel admin de WireGuard, que ya
-tiene `AllowedIPs = 10.0.0.0/8` y por tanto cubre `snet-mgmt` sin tocar la config del gateway.
-Los túneles de equipo no la alcanzan: sus `iptables` en `vm-wg-gateway` solo permiten su propia
-`snet-teamN` + las dos DMZ (validado end-to-end el 2026-08-08, ver
+Grafana at `10.99.0.x:3000`, **no public IP**. Reached via the WireGuard admin tunnel, which already
+has `AllowedIPs = 10.0.0.0/8` and therefore covers `snet-mgmt` without touching the gateway config.
+Team tunnels cannot reach it: their `iptables` on `vm-wg-gateway` only allow their own
+`snet-teamN` + both DMZ (validated end-to-end on 2026-08-08, see
 `docs/plans/wireguard-vpn-gateway.md`).
 
-Puede hacer falta una regla `FORWARD` explícita en el gateway para `admin → 10.99.0.0/24` si el
-`iptables` del admin enumera subredes en vez de permitir `10.0.0.0/8` a secas — verificar contra
-la implementación real de `add-peer.sh.tpl` al implementar F1.
+An explicit `FORWARD` rule in the gateway for `admin → 10.99.0.0/24` may be needed if the
+admin's `iptables` enumerates subnets instead of allowing `10.0.0.0/8` plainly — verify against
+the real implementation of `add-peer.sh.tpl` when implementing F1.
 
-## Costo y cuota
+## Cost and quota
 
 | | vCPU |
 |---|---|
@@ -299,75 +293,74 @@ la implementación real de `add-peer.sh.tpl` al implementar F1.
 | `vm-monitor` (D2s_v7) | 2 |
 | **Total** | **6 / 10** |
 
-Cuota verificada el 2026-08-09: `Total Regional vCPUs` 10, `Standard Dsv7 Family vCPUs` 10, 0 en
-uso con el lab abajo. Quedan 4 vCPU de margen. Los ~93 container groups de ACI no consumen cuota
-de VM.
+Quota verified on 2026-08-09: `Total Regional vCPUs` 10, `Standard Dsv7 Family vCPUs` 10, 0 in
+use with the lab down. 4 vCPU margin remains. The ~93 ACI container groups do not consume VM quota.
 
-D2s_v7 (2 vCPU / 8 GB) sobra para Prometheus con ~95 targets a 15s y una retención de días. Si
-se añade Loki en F4, revisar disco, no CPU.
+D2s_v7 (2 vCPU / 8 GB) is more than enough for Prometheus with ~95 targets at 15s and multi-day retention. If
+Loki is added in F4, check disk, not CPU.
 
-## Fases
+## Phases
 
-### F1 — Stack base y descubrimiento
+### F1 — Base stack and discovery
 
-- Subcomando `deploy-monitor-vm` en `lab-azure.sh`: `vm-monitor` D2s_v7 en `snet-mgmt`, sin IP
-  pública, managed identity con `Reader` sobre el RG. Mismo patrón que `deploy-wiki-vm`.
+- Subcommand `deploy-monitor-vm` in `lab-azure.sh`: `vm-monitor` D2s_v7 in `snet-mgmt`, no public IP,
+  managed identity with `Reader` on the RG. Same pattern as `deploy-wiki-vm`.
 - cloud-init + `docker-compose`: `prometheus`, `blackbox_exporter`, `grafana`, `node_exporter`.
-  Plantillas en `yamls/monitor/`, coherente con `yamls/wg-gateway/`.
-- `gen-targets.sh` + systemd timer (60s) → `file_sd` con los labels `job`/`team`/`service`.
-- Dashboard "Muro de equipos": fila por equipo, columna por servicio, verde/rojo, legible a tres
-  metros. Un segundo dashboard para DMZ.
-- Provisioning de datasource y dashboards como código (`grafana/provisioning/`), no clicks — el
-  stack tiene que sobrevivir un `down`/`up` del RG.
+  Templates in `yamls/monitor/`, consistent with `yamls/wg-gateway/`.
+- `gen-targets.sh` + systemd timer (60s) → `file_sd` with labels `job`/`team`/`service`.
+- "Team wall" dashboard: one row per team, one column per service, green/red, readable from three
+  meters. A second dashboard for DMZ.
+- Datasource and dashboard provisioning as code (`grafana/provisioning/`), no clicks — the
+  stack must survive a `down`/`up` of the RG.
 
-### F2 — Reglas de alerta
+### F2 — Alerting rules
 
-- Las 8 reglas de la tabla en Grafana Unified Alerting, sin contact points.
-- `sabana_ip_drift` en `gen-targets.sh` (textfile collector) y su regla.
-- Panel de alertas activas, ordenado por severidad, en el mismo muro.
+- The 8 rules from the table in Grafana Unified Alerting, no contact points.
+- `sabana_ip_drift` in `gen-targets.sh` (textfile collector) and its rule.
+- Active alerts panel, sorted by severity, on the same wall.
 
-### F3 — `restore` en `lab-azure.sh`
+### F3 — `restore` in `lab-azure.sh`
 
-- `restore team <N> <servicio>` y `restore dmz <servicio>` con la semántica de 3 pasos de arriba.
-- Reutilizar `deploy_team_workload` y la inyección de IP existente.
-- Enlazar el comando exacto desde la descripción de cada alerta en Grafana (el operador copia y
-  pega, no recuerda la sintaxis a las 2am).
+- `restore team <N> <service>` and `restore dmz <service>` with the 3-step semantics above.
+- Reuse `deploy_team_workload` and existing IP injection.
+- Link the exact command from each alert's description in Grafana (operators copy-paste, they don't
+  remember syntax at 2am).
 
 ### F4 — Logs
 
-- Diagnostics de ACI → Log Analytics Workspace en el mismo RG (nativo, no requiere agente en el
-  contenedor; el volumen de un evento de horas es barato).
-- Datasource Azure Monitor en Grafana → los logs del contenedor caído a un click del panel rojo.
-- Alternativa considerada y descartada: Promtail/Loki. No puede leer los logs de un container
-  group de ACI sin un sidecar, que es justamente lo que este plan evita.
+- ACI Diagnostics → Log Analytics Workspace in the same RG (native, no agent in the
+  container needed; the volume of a few-hour event is cheap).
+- Azure Monitor datasource in Grafana → the crashed container's logs one click from the red panel.
+- Alternative considered and rejected: Promtail/Loki. Cannot read logs from an ACI container
+  group without a sidecar, which is exactly what this plan avoids.
 
-**F1 y F2 son el mínimo útil.** F3 es lo que convierte el plan en operable durante el evento.
-F4 es diagnóstico post-mortem y puede quedar para después si el tiempo aprieta.
+**F1 and F2 are the minimum useful.** F3 is what makes the plan operable during the event.
+F4 is post-mortem diagnostics and can be deferred if time is tight.
 
-## Riesgos y cosas a vigilar
+## Risks and things to watch
 
-- **La managed identity es el activo más valioso de `snet-mgmt`.** Un `Reader` sobre el RG expone
-  la topología completa del lab. Hoy, dentro de la VNet, cualquier subred alcanza a `snet-mgmt`
-  (Azure enruta entre subredes de la misma VNet y no hay un solo NSG creado). El gateway VPN
-  bloquea a los equipos, pero no protege contra un pivote *dentro* de la VNet. Esto sube la
-  prioridad de `docs/plans/network-segmentation-nsgs.md`, al menos la regla deny
-  `snet-team*` → `snet-mgmt`. Alcance mínimo: `Reader` sobre el RG, nunca sobre la suscripción.
-- **Rate limits del control plane.** Un `az container list` de todo el RG cada 60s es una llamada;
-  una llamada por container group serían 93 y ARM las va a estrangular. No degradar el script a
-  un bucle de `az container show` "para tener más detalle".
-- **No confundir `vm-monitor` con `dmz-decoy-monitor`.** Nombres, labels de Prometheus y títulos
-  de dashboard tienen que dejar claro cuál es cuál; el decoy expone 3000/9090 precisamente para
-  parecer esto.
-- **La sonda no debe ser una pista para el CTF.** `tcp_connect` contra el `database` está bien;
-  no autenticar. Nada de sondas que dejen rastro en los logs de un reto de forma que confunda al
-  participante (o peor, que le regale la existencia de la red de gestión).
-- **`down` borra el RG entero**, monitor incluido. Invariante del proyecto (`CLAUDE.md`),
-  respetarlo: nada del stack fuera del RG del lab, y toda la config de Grafana provisionada como
-  código para poder reconstruirla.
-- **El health endpoint del `xss-bot` es un cambio en `sabana-corp-network`**, no en este repo.
-  Requiere reconstruir y republicar `maosuarez/sabana-lab-xss-bot:latest`, y coordinarse con el
-  ciclo de despliegue de ese repo.
-- **La delegación de `snet-dmz-shared` a ACI no aplica a `snet-mgmt`.** `snet-mgmt` no está
-  delegada, por eso admite VM. No delegarla nunca a `Microsoft.ContainerInstance/containerGroups`
-  o `vm-monitor` deja de poder existir ahí (mismo problema que forzó `snet-dmz-vm`, ver
+- **The managed identity is the most valuable asset in `snet-mgmt`.** A `Reader` on the RG exposes
+  the complete lab topology. Today, inside the VNet, any subnet can reach `snet-mgmt`
+  (Azure routes between subnets of the same VNet and no NSG is created). The VPN gateway
+  blocks teams, but does not protect against a pivot *inside* the VNet. This raises the
+  priority of `docs/plans/network-segmentation-nsgs.md`, at least the deny rule
+  `snet-team*` → `snet-mgmt`. Minimum scope: `Reader` on the RG, never on the subscription.
+- **Control plane rate limits.** One `az container list` for the entire RG every 60s is one call;
+  one per container group would be 93 and ARM will throttle them. Do not degrade the script to
+  a loop of `az container show` "to get more detail".
+- **Do not confuse `vm-monitor` with `dmz-decoy-monitor`.** Names, Prometheus labels, and
+  dashboard titles must make clear which is which; the decoy exposes 3000/9090 precisely to
+  look like this.
+- **The probe must not be a hint for the CTF.** `tcp_connect` against `database` is fine;
+  do not authenticate. No probes that leave traces in a challenge's logs in a way that confuses
+  the participant (or worse, reveals the existence of the management network).
+- **`down` deletes the entire RG**, monitor included. Project invariant (`CLAUDE.md`),
+  respect it: nothing of the stack outside the lab RG, and all Grafana config provisioned as
+  code so it can be reconstructed.
+- **The xss-bot health endpoint is a change in `sabana-corp-network`**, not this repo.
+  It requires rebuilding and republishing `maosuarez/sabana-lab-xss-bot:latest`, and coordinating
+  with that repo's deployment cycle.
+- **The delegation of `snet-dmz-shared` to ACI does not apply to `snet-mgmt`.** `snet-mgmt` is not
+  delegated, which is why it accepts VMs. Never delegate it to `Microsoft.ContainerInstance/containerGroups`
+  or `vm-monitor` will no longer be able to exist there (same issue that forced `snet-dmz-vm`, see
   `docs/plans/wiki-on-vm.md`).

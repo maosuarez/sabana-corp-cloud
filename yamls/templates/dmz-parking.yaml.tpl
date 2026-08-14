@@ -1,5 +1,5 @@
-# ACI container group: parking (compartido, snet-dmz-shared 10.50.0.0/24) -- reto final Parqueadero.
-# Solo valida en servidor la flag final (PARKING_FINAL_FLAG); no expone la flag al navegador.
+# ACI container group: parking (shared, snet-dmz-shared 10.50.0.0/24) -- final "parking" challenge.
+# Only validates the final flag (PARKING_FINAL_FLAG) server-side; never exposes the flag to the browser.
 apiVersion: 2021-07-01
 location: eastus2
 name: dmz-parking
@@ -14,9 +14,9 @@ properties:
         resources: {requests: {cpu: 0.25, memoryInGB: 0.5}}
         ports: [{port: 8080}]
 
-  # DNSCONFIG-BEGIN -- lo elimina el generador si LAB_DNS_SERVER esta vacio (lab sin gateway).
-  # 2o nameserver a proposito: si dnsmasq no responde, el contenedor sigue resolviendo internet
-  # via Azure DNS (ver docs/plans/internal-dns.md).
+  # DNSCONFIG-BEGIN -- removed by the generator if LAB_DNS_SERVER is empty (lab without gateway).
+  # 2nd nameserver on purpose: if dnsmasq does not respond, the container still resolves internet
+  # via Azure DNS (see docs/plans/internal-dns.md).
   dnsConfig:
     nameServers:
       - "${LAB_DNS_SERVER}"

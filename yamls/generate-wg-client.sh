@@ -1,28 +1,28 @@
 #!/usr/bin/env bash
 #
-# generate-wg-client.sh -- envsubst wrapper minimo (mismo espiritu que generate-wiki-vm.sh: sin
-# validacion propia, lo llama lab-azure.sh despues de ya haber validado todo). Renderiza
-# yamls/templates/wg-client.conf.tpl -> yamls/generated/wg-clients/<name>.conf, y
-# yamls/templates/wg-client-readme.md.tpl -> yamls/generated/wg-clients/<name>-README.md (el
-# entregable del participante -- ver docs/plans/internal-dns.md "Qué se le entrega al participante").
+# generate-wg-client.sh -- minimal envsubst wrapper (same spirit as generate-wiki-vm.sh: no
+# own validation, called by lab-azure.sh after it has already validated everything). Renders
+# yamls/templates/wg-client.conf.tpl -> yamls/generated/wg-clients/<name>.conf, and
+# yamls/templates/wg-client-readme.md.tpl -> yamls/generated/wg-clients/<name>-README.md (the
+# participant deliverable -- see docs/plans/internal-dns.md "What is delivered to the participant").
 #
-# Variables esperadas ya exportadas por el llamador: PEER_NAME, CLIENT_PRIVKEY,
+# Variables expected to already be exported by the caller: PEER_NAME, CLIENT_PRIVKEY,
 # CLIENT_TUNNEL_IP, CLIENT_DNS, SERVER_PUBKEY, GATEWAY_PUBLIC_IP, CLIENT_ALLOWED_IPS, LAB_DOMAIN.
 #
-# Uso: PEER_NAME=team3 CLIENT_PRIVKEY=... ... LAB_DOMAIN=sabanacorp.internal ./generate-wg-client.sh
+# Usage: PEER_NAME=team3 CLIENT_PRIVKEY=... ... LAB_DOMAIN=sabanacorp.internal ./generate-wg-client.sh
 
 set -euo pipefail
 
-: "${PEER_NAME:?Falta exportar PEER_NAME}"
-: "${CLIENT_PRIVKEY:?Falta exportar CLIENT_PRIVKEY}"
-: "${CLIENT_TUNNEL_IP:?Falta exportar CLIENT_TUNNEL_IP}"
-: "${CLIENT_DNS:?Falta exportar CLIENT_DNS}"
-: "${SERVER_PUBKEY:?Falta exportar SERVER_PUBKEY}"
-: "${GATEWAY_PUBLIC_IP:?Falta exportar GATEWAY_PUBLIC_IP}"
-: "${CLIENT_ALLOWED_IPS:?Falta exportar CLIENT_ALLOWED_IPS}"
-: "${LAB_DOMAIN:?Falta exportar LAB_DOMAIN}"
+: "${PEER_NAME:?Missing exported PEER_NAME}"
+: "${CLIENT_PRIVKEY:?Missing exported CLIENT_PRIVKEY}"
+: "${CLIENT_TUNNEL_IP:?Missing exported CLIENT_TUNNEL_IP}"
+: "${CLIENT_DNS:?Missing exported CLIENT_DNS}"
+: "${SERVER_PUBKEY:?Missing exported SERVER_PUBKEY}"
+: "${GATEWAY_PUBLIC_IP:?Missing exported GATEWAY_PUBLIC_IP}"
+: "${CLIENT_ALLOWED_IPS:?Missing exported CLIENT_ALLOWED_IPS}"
+: "${LAB_DOMAIN:?Missing exported LAB_DOMAIN}"
 
-command -v envsubst >/dev/null 2>&1 || { echo "[ERROR] falta 'envsubst' (paquete gettext-base)."; exit 1; }
+command -v envsubst >/dev/null 2>&1 || { echo "[ERROR] missing 'envsubst' (package gettext-base)."; exit 1; }
 
 WORKDIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
 OUTDIR="${WORKDIR}/generated/wg-clients"
@@ -33,19 +33,19 @@ VARS='${PEER_NAME} ${CLIENT_PRIVKEY} ${CLIENT_TUNNEL_IP} ${CLIENT_DNS} ${SERVER_
 out="${OUTDIR}/${PEER_NAME}.conf"
 envsubst "$VARS" < "${WORKDIR}/templates/wg-client.conf.tpl" > "$out"
 chmod 600 "$out"
-echo "generado: $out"
+echo "generated: $out"
 
-# Tabla de servicios del propio equipo -- solo si PEER_NAME es team<N> (el peer 'admin' no tiene
-# equipo propio, se queda solo con la tabla de la DMZ del README).
+# Service table for the team itself -- only if PEER_NAME is team<N> (the 'admin' peer does not have
+# its own team, it only gets the DMZ table from the README).
 TEAM_SERVICES_BLOCK=""
 if [[ "$PEER_NAME" =~ ^team([0-9]+)$ ]]; then
   team="${BASH_REMATCH[1]}"
   TEAM_SERVICES_BLOCK="$(cat <<EOF
-| Servicio (tu equipo) | Nombre |
+| Service (your team) | Name |
 |---|---|
-| Helpdesk (Reto 1: XSS/LFI) | \`webapp.team${team}.${LAB_DOMAIN}\` (alias: \`helpdesk.team${team}.${LAB_DOMAIN}\`) |
-| Base de datos | \`database.team${team}.${LAB_DOMAIN}\` (alias: \`db.team${team}.${LAB_DOMAIN}\`) |
-| Servidor Linux (Reto 3: pivote) | \`linux-server.team${team}.${LAB_DOMAIN}\` (alias: \`pivot.team${team}.${LAB_DOMAIN}\`) |
+| Helpdesk (Challenge 1: XSS/LFI) | \`webapp.team${team}.${LAB_DOMAIN}\` (alias: \`helpdesk.team${team}.${LAB_DOMAIN}\`) |
+| Database | \`database.team${team}.${LAB_DOMAIN}\` (alias: \`db.team${team}.${LAB_DOMAIN}\`) |
+| Linux Server (Challenge 3: pivot) | \`linux-server.team${team}.${LAB_DOMAIN}\` (alias: \`pivot.team${team}.${LAB_DOMAIN}\`) |
 | XSS-bot | \`xss-bot.team${team}.${LAB_DOMAIN}\` (alias: \`bot.team${team}.${LAB_DOMAIN}\`) |
 EOF
 )"
@@ -55,18 +55,18 @@ export TEAM_SERVICES_BLOCK LAB_DOMAIN
 readme_out="${OUTDIR}/${PEER_NAME}-README.md"
 envsubst '${PEER_NAME} ${LAB_DOMAIN} ${TEAM_SERVICES_BLOCK}' \
   < "${WORKDIR}/templates/wg-client-readme.md.tpl" > "$readme_out"
-echo "generado: $readme_out"
+echo "generated: $readme_out"
 
-# Bundle de un solo archivo de nmap-sabana-corp (docs/plans/nmap-sabana-corp.md, "Distribucion al
-# participante", capa 2) -- no depende de PEER_NAME, se regenera igual en cada llamada porque no
-# hay estado de equipo que cachear y el costo es una concatenacion de unos pocos KB (<100ms).
+# Single-file bundle of nmap-sabana-corp (docs/plans/nmap-sabana-corp.md, "Distribution to
+# participant", layer 2) -- does not depend on PEER_NAME, regenerates the same way on every call because there
+# is no team state to cache and the cost is a concatenation of a few KB (<100ms).
 NMAP_TOOL_DIR="${WORKDIR}/../tools/nmap-sabana-corp"
 if [[ -f "${NMAP_TOOL_DIR}/scripts/build-bundle.mjs" ]]; then
   if command -v node >/dev/null 2>&1; then
     node "${NMAP_TOOL_DIR}/scripts/build-bundle.mjs" "${OUTDIR}/nmap-sabana-corp.mjs"
   else
-    echo "[WARN] 'node' no disponible -- no se genero nmap-sabana-corp.mjs (el participante puede seguir usando 'npm i -g nmap-sabana-corp')." >&2
+    echo "[WARN] 'node' not available -- nmap-sabana-corp.mjs not generated (participant can still use 'npm i -g nmap-sabana-corp')." >&2
   fi
 else
-  echo "[WARN] tools/nmap-sabana-corp no encontrado -- no se genero nmap-sabana-corp.mjs." >&2
+  echo "[WARN] tools/nmap-sabana-corp not found -- nmap-sabana-corp.mjs not generated." >&2
 fi

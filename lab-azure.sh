@@ -1,73 +1,73 @@
 #!/usr/bin/env bash
 #
-# lab-azure.sh — Entorno de prueba Azure para el CTF Semana de Ingeniería
+# lab-azure.sh — Azure test environment for Engineering Week CTF
 #
-# Resumen de lo que se hizo y validó (2026-08-01/02, sesión de prueba):
-#   1. az CLI instalado y verificado (Ubuntu/WSL)
-#   2. az login -> suscripción "Azure for Students" (tenant Universidad de la Sabana)
-#   3. Resource Group creado
-#   4. VNet creada con 4 subredes: wg-gateway, dmz-shared, team1, mgmt
-#   5. snet-team1 delegada a Microsoft.ContainerInstance/containerGroups
-#   6. Provider Microsoft.ContainerInstance registrado en la suscripción
+# Summary of what was done and validated (2026-08-01/02, test run):
+#   1. az CLI installed and verified (Ubuntu/WSL)
+#   2. az login -> "Azure for Students" subscription (tenant Universidad de la Sabana)
+#   3. Resource Group created
+#   4. VNet created with 4 subnets: wg-gateway, dmz-shared, team1, mgmt
+#   5. snet-team1 delegated to Microsoft.ContainerInstance/containerGroups
+#   6. Provider Microsoft.ContainerInstance registered in subscription
 #   7. Container group "team1-edificio" (database + webapp + linux-server + xss-bot)
-#      desplegado en snet-team1 con IP privada 10.60.1.4 -- FUNCIONÓ, los 4 contenedores
-#      quedaron en estado Running (verificado con az container show / az container logs).
+#      deployed in snet-team1 with private IP 10.60.1.4 -- WORKED, all 4 containers
+#      ended up in Running state (verified with az container show / az container logs).
 #
-# Desde entonces (ver yamls/): el despliegue monolítico de arriba se reemplazó por
-# 1-YAML-por-contenedor (yamls/templates/*.tpl + yamls/generate-{team,dmz}.sh), para que cada
-# contenedor reciba su propia IP privada. Este script ahora orquesta esos YAML en vez de generar
-# uno combinado.
+# Since then (see yamls/): the monolithic deployment above was replaced by
+# 1-YAML-per-container (yamls/templates/*.tpl + yamls/generate-{team,dmz}.sh), so each
+# container gets its own private IP. This script now orchestrates those YAMLs instead of generating
+# one combined file.
 #
-# Uso:
-#   export DOCKERHUB_USER="tu_usuario"
-#   export DOCKERHUB_TOKEN="tu_access_token"   # Docker Hub -> Account Settings -> Security -> New Access Token
-#   cp yamls/.env.secrets.example yamls/.env.secrets   # solo la primera vez, editar valores reales
+# Usage:
+#   export DOCKERHUB_USER="your_username"
+#   export DOCKERHUB_TOKEN="your_access_token"   # Docker Hub -> Account Settings -> Security -> New Access Token
+#   cp yamls/.env.secrets.example yamls/.env.secrets   # first time only, edit actual values
 #
-#   ./lab-azure.sh up            # crea RG + VNet + subredes base + delega snet-dmz-shared
-#   ./lab-azure.sh deploy-dmz    # despliega los 13 contenedores compartidos de la DMZ (sin wiki)
-#   ./lab-azure.sh deploy-wg-gateway # crea vm-wg-gateway en snet-wg-gateway (IP publica,
-#                                 # WireGuard UDP 51820) + peer admin -- correr antes del primer
-#                                 # add-team para que los equipos ya salgan con su tunel.
-#                                 # Validado end-to-end 2026-08-08, ver
+#   ./lab-azure.sh up            # creates RG + VNet + base subnets + delegates snet-dmz-shared
+#   ./lab-azure.sh deploy-dmz    # deploys 13 shared DMZ containers (without wiki)
+#   ./lab-azure.sh deploy-wg-gateway # creates vm-wg-gateway in snet-wg-gateway (public IP,
+#                                 # WireGuard UDP 51820) + admin peer -- run before first
+#                                 # add-team so teams already have their tunnel.
+#                                 # Validated end-to-end 2026-08-08, see
 #                                 # docs/plans/wireguard-vpn-gateway.md
-#   ./lab-azure.sh add-team 1    # crea snet-team1, despliega sus 4 contenedores y (si el gateway
-#                                 # ya existe) su peer WireGuard + yamls/generated/wg-clients/team1.conf
-#   ./lab-azure.sh add-team 2    # idem para team2 (repetir por cada equipo)
-#   ./lab-azure.sh add-team-range 1 20   # add-team 1..20 secuencial, se detiene en el primer error
-#   ./lab-azure.sh add-team-range 1 20 4 # idem pero 4 equipos a la vez (subnets/peers WG siguen
-#                                 # secuenciales, ver add_team_range() para el porqué)
-#   ./lab-azure.sh deploy-wiki-vm # crea vm-wiki en snet-dmz-vm y levanta wiki+wiki-db via
-#                                 # docker-compose -- validado end-to-end 2026-08-08, ver
-#                                 # docs/plans/wiki-on-vm.md (cuota de VM desbloqueada ese mismo
-#                                 # dia tras upgrade a Pay-As-You-Go, 10 vCPUs
-#                                 # StandardDsv7Family en eastus2)
-#   ./lab-azure.sh deploy-ctfd-vm # crea vm-ctfd en snet-dmz-vm (nginx + ctfd + mariadb + redis via
-#                                 # docker-compose) -- F2 de docs/plans/ctfd-deployment.md, requiere
-#                                 # bloque CTFD_* en yamls/.env.secrets y la imagen
-#                                 # <DOCKERHUB_USER>/sabana-corp-ctfd ya publicada
-#   ./lab-azure.sh deploy-monitor-vm # crea vm-monitor en snet-mgmt (Prometheus + blackbox_exporter
-#                                 # + Grafana + node_exporter, sin IP publica, managed identity
-#                                 # Reader sobre el RG) -- F1+F2 de
+#   ./lab-azure.sh add-team 1    # creates snet-team1, deploys its 4 containers and (if gateway
+#                                 # already exists) its WireGuard peer + yamls/generated/wg-clients/team1.conf
+#   ./lab-azure.sh add-team 2    # same for team2 (repeat for each team)
+#   ./lab-azure.sh add-team-range 1 20   # add-team 1..20 sequential, stops on first error
+#   ./lab-azure.sh add-team-range 1 20 4 # same but 4 teams at a time (subnets/WG peers still
+#                                 # sequential, see add_team_range() for why)
+#   ./lab-azure.sh deploy-wiki-vm # creates vm-wiki in snet-dmz-vm and brings up wiki+wiki-db via
+#                                 # docker-compose -- validated end-to-end 2026-08-08, see
+#                                 # docs/plans/wiki-on-vm.md (VM quota unblocked same day
+#                                 # after upgrade to Pay-As-You-Go, 10 vCPUs
+#                                 # StandardDsv7Family in eastus2)
+#   ./lab-azure.sh deploy-ctfd-vm # creates vm-ctfd in snet-dmz-vm (nginx + ctfd + mariadb + redis via
+#                                 # docker-compose) -- F2 of docs/plans/ctfd-deployment.md, requires
+#                                 # CTFD_* block in yamls/.env.secrets and the image
+#                                 # <DOCKERHUB_USER>/sabana-corp-ctfd already published
+#   ./lab-azure.sh deploy-monitor-vm # creates vm-monitor in snet-mgmt (Prometheus + blackbox_exporter
+#                                 # + Grafana + node_exporter, no public IP, managed identity
+#                                 # Reader over RG) -- F1+F2 of
 #                                 # docs/plans/observability-monitoring.md
-#   ./lab-azure.sh dns-sync            # empuja el estado LOCAL (yamls/generated/dns/*.hosts) al
-#                                # dnsmasq de vm-wg-gateway en una sola invocacion (O(1)) -- ver
+#   ./lab-azure.sh dns-sync            # pushes LOCAL state (yamls/generated/dns/*.hosts) to
+#                                # dnsmasq on vm-wg-gateway in a single invocation (O(1)) -- see
 #                                # docs/plans/internal-dns.md
-#   ./lab-azure.sh dns-sync --from-azure # reconstruye TODA la zona desde 'az container list' y
-#                                # la empuja -- comando de reparacion / chequeo pre-evento
-#   ./lab-azure.sh dns-check <fqdn>  # resuelve <fqdn> desde el gateway y lo compara con la IP
-#                                # real de Azure
-#   ./lab-azure.sh test [N]      # atajo: up + deploy-dmz + add-team N (N=1 si se omite) -- todo
-#                                # el laboratorio de una vez para pruebas rapidas (sin gateway VPN
-#                                # a proposito, ver nota en deploy_wg_gateway())
-#   ./lab-azure.sh status        # lista todos los container groups del RG (nombre/estado/IP)
-#   ./lab-azure.sh down          # destruye TODO (borra el resource group completo)
+#   ./lab-azure.sh dns-sync --from-azure # rebuilds ENTIRE zone from 'az container list' and
+#                                # pushes it -- repair command / pre-event check
+#   ./lab-azure.sh dns-check <fqdn>  # resolves <fqdn> from gateway and compares with real IP
+#                                # from Azure
+#   ./lab-azure.sh test [N]      # shortcut: up + deploy-dmz + add-team N (N=1 if omitted) -- entire
+#                                # lab at once for quick testing (no VPN gateway
+#                                # on purpose, see note in deploy_wg_gateway())
+#   ./lab-azure.sh status        # lists all container groups in RG (name/state/IP)
+#   ./lab-azure.sh down          # destroys EVERYTHING (deletes entire resource group)
 #
-# Diseño: todo vive dentro de un solo Resource Group, así que "down" es un solo comando.
+# Design: everything lives in a single Resource Group, so "down" is a single command.
 
 set -euo pipefail
 
 # ---------------------------------------------------------------------------
-# Variables (ajusta aquí si cambias nombres)
+# Variables (adjust here if you change names)
 # ---------------------------------------------------------------------------
 RG="rg-ctf-semana-ingenieria-test"
 LOCATION="eastus2"
@@ -77,23 +77,22 @@ YAMLS_DIR="${WORKDIR}/yamls"
 WG_CLIENTS_DIR="${YAMLS_DIR}/generated/wg-clients"
 SUBSCRIPTION_ID=""
 
-# DNS interno del lab (ver docs/plans/internal-dns.md). LAB_DOMAIN vive en esta unica variable a
-# proposito -- cambiarlo es una edicion aqui + un dns-sync. WG_GW_PRIVATE_IP/WG_GW_TUNNEL_IP son
-# constantes de diseño (la primera se fija con --private-ip-address en deploy_wg_gateway, la
-# segunda la fija yamls/wg-gateway/cloud-init.yaml) -- no hay que descubrirlas en tiempo de
-# generacion.
+# Lab internal DNS (see docs/plans/internal-dns.md). LAB_DOMAIN lives in this single variable on
+# purpose -- changing it is an edit here + a dns-sync. WG_GW_PRIVATE_IP/WG_GW_TUNNEL_IP are
+# design constants (first is set with --private-ip-address in deploy_wg_gateway, second is set by
+# yamls/wg-gateway/cloud-init.yaml) -- don't need to discover them at generation time.
 LAB_DOMAIN="${LAB_DOMAIN:-sabanacorp.internal}"
 WG_GW_PRIVATE_IP="10.10.0.4"
 WG_GW_TUNNEL_IP="10.200.0.1"
 DNS_DIR="${YAMLS_DIR}/generated/dns"
 
 # ---------------------------------------------------------------------------
-# Funciones auxiliares
+# Helper functions
 # ---------------------------------------------------------------------------
 
 require_dockerhub_env() {
-  : "${DOCKERHUB_USER:?Falta exportar DOCKERHUB_USER}"
-  : "${DOCKERHUB_TOKEN:?Falta exportar DOCKERHUB_TOKEN}"
+  : "${DOCKERHUB_USER:?Must export DOCKERHUB_USER}"
+  : "${DOCKERHUB_TOKEN:?Must export DOCKERHUB_TOKEN}"
 }
 
 get_subscription_id() {
@@ -103,10 +102,10 @@ get_subscription_id() {
   echo "$SUBSCRIPTION_ID"
 }
 
-# Espera hasta que un container group tenga IP asignada. Los container groups inyectados en una
-# subred (VNet integration) son notoriamente lentos/inestables para que Azure les asigne la IP --
-# 'az container create' puede devolver antes de que ipAddress.ip este poblado. Reintenta con
-# timeout en vez de propagar un valor vacio.
+# Waits until a container group has an IP assigned. Container groups injected in a
+# subnet (VNet integration) are notoriously slow/unstable getting their IP --
+# 'az container create' may return before ipAddress.ip is populated. Retries with
+# timeout instead of propagating empty value.
 wait_for_ip() {
   local name="$1"
   local max_tries=30 tries=0 ip=""
@@ -114,21 +113,21 @@ wait_for_ip() {
     ip="$(az container show --resource-group "$RG" --name "$name" --query ipAddress.ip --output tsv 2>/dev/null || true)"
     if [[ -z "$ip" ]]; then
       tries=$((tries + 1))
-      echo "  ... ${name} sin IP todavia (intento ${tries}/${max_tries}), esperando 10s" >&2
+      echo "  ... ${name} no IP yet (attempt ${tries}/${max_tries}), waiting 10s" >&2
       sleep 10
     fi
   done
   if [[ -z "$ip" ]]; then
-    echo "[ERROR] ${name}: no se pudo obtener IP tras $((max_tries * 10 / 60)) min. Revisa:" >&2
-    echo "  az container show -g ${RG} -n ${name} --query \"{estado:instanceView.state, ip:ipAddress.ip}\" -o table" >&2
+    echo "[ERROR] ${name}: could not get IP after $((max_tries * 10 / 60)) min. Check:" >&2
+    echo "  az container show -g ${RG} -n ${name} --query \"{state:instanceView.state, ip:ipAddress.ip}\" -o table" >&2
     echo "  az container logs -g ${RG} -n ${name}" >&2
     exit 1
   fi
   echo "$ip"
 }
 
-# Despliega un container group desde un YAML y devuelve su IP privada por stdout (con reintentos).
-# Los echo de progreso van al llamador, no aquí, para no contaminar la captura por $(...).
+# Deploys a container group from a YAML and returns its private IP via stdout (with retries).
+# Progress messages go to caller, not here, to avoid contaminating the capture by $(...).
 deploy_container() {
   local file="$1"
   local name
@@ -138,23 +137,23 @@ deploy_container() {
 }
 
 # ---------------------------------------------------------------------------
-# Funciones — infraestructura base
+# Functions — base infrastructure
 # ---------------------------------------------------------------------------
 
 check_prereqs() {
-  echo "== Verificando az CLI y sesión =="
-  az version >/dev/null || { echo "az CLI no instalado. Ver: curl -sL https://aka.ms/InstallAzureCLIDeb | sudo bash"; exit 1; }
-  az account show >/dev/null 2>&1 || { echo "No hay sesión activa. Corre: az login"; exit 1; }
+  echo "== Checking az CLI and session =="
+  az version >/dev/null || { echo "az CLI not installed. See: curl -sL https://aka.ms/InstallAzureCLIDeb | sudo bash"; exit 1; }
+  az account show >/dev/null 2>&1 || { echo "No active session. Run: az login"; exit 1; }
   az account show --output table
 }
 
 create_resource_group() {
-  echo "== Paso 1/4: Resource Group =="
+  echo "== Step 1/4: Resource Group =="
   az group create --name "$RG" --location "$LOCATION" --output table
 }
 
 create_vnet() {
-  echo "== Paso 2/4: VNet + subredes base =="
+  echo "== Step 2/4: VNet + base subnets =="
   az network vnet create \
     --resource-group "$RG" \
     --name "$VNET" \
@@ -170,35 +169,35 @@ create_vnet() {
   az network vnet subnet create --resource-group "$RG" --vnet-name "$VNET" \
     --name snet-mgmt --address-prefixes 10.99.0.0/24 --output none
 
-  # DMZ paralela para servicios que no corren en ACI (ver docs/plans/wiki-on-vm.md): a diferencia
-  # de snet-dmz-shared, esta NO se delega a ACI, así que admite VMs. Aquí vive vm-wiki
-  # (wiki + wiki-db con docker-compose), desplegada por './lab-azure.sh deploy-wiki-vm' y
-  # validada end-to-end 2026-08-08.
+  # Parallel DMZ for services that don't run in ACI (see docs/plans/wiki-on-vm.md): unlike
+  # snet-dmz-shared, this is NOT delegated to ACI, so it supports VMs. Here lives vm-wiki
+  # (wiki + wiki-db with docker-compose), deployed by './lab-azure.sh deploy-wiki-vm' and
+  # validated end-to-end 2026-08-08.
   az network vnet subnet create --resource-group "$RG" --vnet-name "$VNET" \
     --name snet-dmz-vm --address-prefixes 10.51.0.0/24 --output none
 
-  echo "Subredes base creadas (snet-team<N> se crean con 'add-team <N>')."
+  echo "Base subnets created (snet-team<N> created with 'add-team <N>')."
 }
 
 register_aci_provider() {
-  echo "== Paso 3/4: Registrar provider Microsoft.ContainerInstance =="
+  echo "== Step 3/4: Register Microsoft.ContainerInstance provider =="
   az provider register --namespace Microsoft.ContainerInstance
-  echo "Esperando a que quede 'Registered' (puede tardar 1-2 min)..."
+  echo "Waiting for 'Registered' status (may take 1-2 min)..."
   until [[ "$(az provider show --namespace Microsoft.ContainerInstance --query registrationState --output tsv)" == "Registered" ]]; do
     sleep 5
   done
-  echo "Provider registrado."
+  echo "Provider registered."
 }
 
 delegate_dmz_subnet() {
-  echo "== Paso 4/4: Delegar snet-dmz-shared a ACI =="
+  echo "== Step 4/4: Delegate snet-dmz-shared to ACI =="
   az network vnet subnet update \
     --resource-group "$RG" \
     --vnet-name "$VNET" \
     --name snet-dmz-shared \
     --delegations Microsoft.ContainerInstance/containerGroups \
     --output none
-  echo "snet-dmz-shared delegada."
+  echo "snet-dmz-shared delegated."
 }
 
 up() {
@@ -208,122 +207,122 @@ up() {
   register_aci_provider
   delegate_dmz_subnet
   echo ""
-  echo "== LISTO == Infraestructura base creada (RG, VNet, subredes, snet-dmz-shared delegada)."
-  echo "Siguiente paso:"
-  echo "  ./lab-azure.sh deploy-dmz     # despliega los servicios compartidos de la DMZ"
-  echo "  ./lab-azure.sh deploy-wiki-vm # crea vm-wiki (wiki+wiki-db) en snet-dmz-vm"
-  echo "  ./lab-azure.sh add-team 1     # crea snet-team1 y despliega sus 4 contenedores"
+  echo "== DONE == Base infrastructure created (RG, VNet, subnets, snet-dmz-shared delegated)."
+  echo "Next steps:"
+  echo "  ./lab-azure.sh deploy-dmz     # deploys shared DMZ services"
+  echo "  ./lab-azure.sh deploy-wiki-vm # creates vm-wiki (wiki+wiki-db) in snet-dmz-vm"
+  echo "  ./lab-azure.sh add-team 1     # creates snet-team1 and deploys its 4 containers"
 }
 
 # ---------------------------------------------------------------------------
-# Funciones — DMZ compartida (snet-dmz-shared, 10.50.0.0/24)
+# Functions — shared DMZ (snet-dmz-shared, 10.50.0.0/24)
 # ---------------------------------------------------------------------------
 
 deploy_dmz() {
   require_dockerhub_env
-  echo "== Generando YAML de la DMZ (yamls/generate-dmz.sh) =="
+  echo "== Generating DMZ YAML (yamls/generate-dmz.sh) =="
   RESOURCE_GROUP="$RG" VNET="$VNET" SUBSCRIPTION_ID="$(get_subscription_id)" \
     LAB_DOMAIN="$LAB_DOMAIN" LAB_DNS_SERVER="$(lab_dns_server)" \
     "${YAMLS_DIR}/generate-dmz.sh"
 
   local gen="${YAMLS_DIR}/generated"
 
-  # El wiki (BookStack + MariaDB) NO vive aquí: s6-overlay v3 exige PID 1 real, que ACI+VNet
-  # no garantiza -- confirmado determinísticamente (ExitCode 100, CrashLoopBackOff). Corre en
-  # vm-wiki con docker-compose vía './lab-azure.sh deploy-wiki-vm' (ver docs/plans/wiki-on-vm.md).
-  # Sus plantillas de ACI (dmz-wiki*.yaml.tpl) fueron borradas: no se desplegaban.
+  # Wiki (BookStack + MariaDB) does NOT live here: s6-overlay v3 requires real PID 1, which ACI+VNet
+  # doesn't guarantee -- confirmed deterministically (ExitCode 100, CrashLoopBackOff). Runs in
+  # vm-wiki with docker-compose via './lab-azure.sh deploy-wiki-vm' (see docs/plans/wiki-on-vm.md).
+  # Its ACI templates (dmz-wiki*.yaml.tpl) were deleted: they never deployed.
   local svc
   for svc in dmz-filesrv dmz-parking \
              dmz-decoy-printer dmz-decoy-nas dmz-decoy-legacy-web dmz-decoy-database \
              dmz-decoy-camera dmz-decoy-backup dmz-decoy-admin dmz-decoy-ftp \
              dmz-decoy-monitor dmz-decoy-git dmz-decoy-mail; do
-    echo "== Desplegando ${svc} =="
+    echo "== Deploying ${svc} =="
     deploy_container "${gen}/${svc}.yaml" >/dev/null
   done
 
-  echo "== Registrando DNS de la DMZ (dmz.hosts + infra.hosts) =="
+  echo "== Registering DMZ DNS (dmz.hosts + infra.hosts) =="
   RESOURCE_GROUP="$RG" LAB_DOMAIN="$LAB_DOMAIN" WG_GW_TUNNEL_IP="$WG_GW_TUNNEL_IP" \
     "${YAMLS_DIR}/generate-dns-hosts.sh" dmz
   sync_lab_dns
 
   echo ""
-  echo "== DMZ desplegada: 13 contenedores, cada uno con su propia IP en snet-dmz-shared =="
-  echo "== wiki queda pendiente: ./lab-azure.sh deploy-wiki-vm (VM en snet-dmz-vm) =="
+  echo "== DMZ deployed: 13 containers, each with its own IP in snet-dmz-shared =="
+  echo "== wiki still pending: ./lab-azure.sh deploy-wiki-vm (VM in snet-dmz-vm) =="
   status
 }
 
 # ---------------------------------------------------------------------------
-# Funciones — equipos (snet-teamN, 10.60.N.0/24)
+# Functions — teams (snet-teamN, 10.60.N.0/24)
 # ---------------------------------------------------------------------------
 
 add_team_subnet() {
   local team="$1"
   local prefix="10.60.${team}.0/24"
-  echo "== Creando snet-team${team} (${prefix}) =="
+  echo "== Creating snet-team${team} (${prefix}) =="
   az network vnet subnet create --resource-group "$RG" --vnet-name "$VNET" \
     --name "snet-team${team}" --address-prefixes "$prefix" --output none
   az network vnet subnet update --resource-group "$RG" --vnet-name "$VNET" \
     --name "snet-team${team}" --delegations Microsoft.ContainerInstance/containerGroups --output none
-  echo "snet-team${team} creada y delegada."
+  echo "snet-team${team} created and delegated."
 }
 
 validate_team_num() {
   case "$1" in
-    ''|*[!0-9]*) echo "[ERROR] numero de equipo invalido: '${1:-}' (ej. 1, 2, 20)."; exit 1 ;;
+    ''|*[!0-9]*) echo "[ERROR] invalid team number: '${1:-}' (e.g., 1, 2, 20)."; exit 1 ;;
   esac
 }
 
 require_team_prereqs() {
   require_dockerhub_env
   [[ -f "${YAMLS_DIR}/.env.secrets" ]] || {
-    echo "[ERROR] falta ${YAMLS_DIR}/.env.secrets (copia .env.secrets.example y rellena valores reales)."
+    echo "[ERROR] missing ${YAMLS_DIR}/.env.secrets (copy .env.secrets.example and fill in actual values)."
     exit 1
   }
 }
 
-# Genera y despliega los 4 contenedores de un equipo (sin subnet, sin peer WireGuard, sin
-# status) -- separado de deploy_team() para poder correrlo en paralelo entre equipos en
-# add_team_range() con concurrencia > 1. La cadena database->webapp->xss-bot (cada uno necesita
-# la IP del anterior) sigue siendo secuencial DENTRO de un equipo; lo que se paraleliza es entre
-# equipos, que son completamente independientes entre sí.
+# Generates and deploys 4 containers for a team (no subnet, no WireGuard peer, no
+# status) -- separated from deploy_team() so it can run in parallel between teams in
+# add_team_range() with concurrency > 1. The database->webapp->xss-bot chain (each needs
+# the previous IP) remains sequential WITHIN a team; what's parallelized is between
+# teams, which are completely independent.
 deploy_team_workload() {
   local team="$1"
 
-  echo "== Generando YAML de team${team} (yamls/generate-team.sh) =="
+  echo "== Generating YAML for team${team} (yamls/generate-team.sh) =="
   RESOURCE_GROUP="$RG" VNET="$VNET" SUBSCRIPTION_ID="$(get_subscription_id)" \
     LAB_DOMAIN="$LAB_DOMAIN" LAB_DNS_SERVER="$(lab_dns_server)" \
     "${YAMLS_DIR}/generate-team.sh" "$team"
 
   local gen="${YAMLS_DIR}/generated"
 
-  echo "== Desplegando team${team}-database =="
+  echo "== Deploying team${team}-database =="
   local db_ip
   db_ip="$(deploy_container "${gen}/team${team}-database.yaml")"
   echo "team${team}-database IP: ${db_ip}"
   sed -i "s|<DATABASE_IP>|${db_ip}|" "${gen}/team${team}-webapp.yaml"
 
-  echo "== Desplegando team${team}-webapp =="
+  echo "== Deploying team${team}-webapp =="
   local webapp_ip
   webapp_ip="$(deploy_container "${gen}/team${team}-webapp.yaml")"
   echo "team${team}-webapp IP: ${webapp_ip}"
   sed -i "s|<WEBAPP_IP>|${webapp_ip}|" "${gen}/team${team}-xss-bot.yaml"
 
-  echo "== Desplegando team${team}-xss-bot =="
+  echo "== Deploying team${team}-xss-bot =="
   local bot_ip
   bot_ip="$(deploy_container "${gen}/team${team}-xss-bot.yaml")"
 
-  echo "== Desplegando team${team}-linux-server =="
+  echo "== Deploying team${team}-linux-server =="
   local linux_ip
   linux_ip="$(deploy_container "${gen}/team${team}-linux-server.yaml")"
 
-  # DNS: solo escritura LOCAL aqui (yamls/generated/dns/team<N>.hosts) -- nada de run-command.
-  # Es lo que mantiene esta funcion segura de correr en paralelo entre equipos en
-  # add_team_range(); el push al gateway (O(1), no por equipo) va en un paso secuencial aparte
-  # (ver sync_lab_dns y "Mecanismo de escritura de la zona" en docs/plans/internal-dns.md).
+  # DNS: LOCAL write only here (yamls/generated/dns/team<N>.hosts) -- no run-command.
+  # This keeps this function safe to run in parallel between teams in
+  # add_team_range(); the push to gateway (O(1), not per-team) goes in a separate sequential step
+  # (see sync_lab_dns and "Zone write mechanism" in docs/plans/internal-dns.md).
   RESOURCE_GROUP="$RG" LAB_DOMAIN="$LAB_DOMAIN" WG_GW_TUNNEL_IP="$WG_GW_TUNNEL_IP" \
     "${YAMLS_DIR}/generate-dns-hosts.sh" team "$team" "$db_ip" "$webapp_ip" "$linux_ip" "$bot_ip"
 
-  echo "== team${team} desplegado: 4 contenedores, cada uno con su propia IP en snet-team${team} =="
+  echo "== team${team} deployed: 4 containers, each with its own IP in snet-team${team} =="
 }
 
 deploy_team() {
@@ -344,16 +343,16 @@ deploy_team() {
 add_team_range() {
   local start="$1" end="$2" concurrency="${3:-1}"
 
-  case "$start" in ''|*[!0-9]*) echo "[ERROR] uso: $0 add-team-range <inicio> <fin> [paralelismo] (ej. 1 20 4)."; exit 1 ;; esac
-  case "$end" in ''|*[!0-9]*) echo "[ERROR] uso: $0 add-team-range <inicio> <fin> [paralelismo] (ej. 1 20 4)."; exit 1 ;; esac
-  case "$concurrency" in ''|*[!0-9]*|0) echo "[ERROR] <paralelismo> debe ser un entero >= 1."; exit 1 ;; esac
+  case "$start" in ''|*[!0-9]*) echo "[ERROR] usage: $0 add-team-range <start> <end> [concurrency] (e.g., 1 20 4)."; exit 1 ;; esac
+  case "$end" in ''|*[!0-9]*) echo "[ERROR] usage: $0 add-team-range <start> <end> [concurrency] (e.g., 1 20 4)."; exit 1 ;; esac
+  case "$concurrency" in ''|*[!0-9]*|0) echo "[ERROR] <concurrency> must be an integer >= 1."; exit 1 ;; esac
   if (( start > end )); then
-    echo "[ERROR] <inicio> (${start}) no puede ser mayor que <fin> (${end})."
+    echo "[ERROR] <start> (${start}) cannot be greater than <end> (${end})."
     exit 1
   fi
 
   if (( concurrency == 1 )); then
-    echo "== Desplegando equipos ${start}..${end} (secuencial, se detiene en el primer error) =="
+    echo "== Deploying teams ${start}..${end} (sequential, stops on first error) =="
     local team
     for (( team = start; team <= end; team++ )); do
       echo ""
@@ -361,33 +360,33 @@ add_team_range() {
       deploy_team "$team"
     done
     echo ""
-    echo "== LISTO: equipos ${start}..${end} desplegados =="
+    echo "== DONE: teams ${start}..${end} deployed =="
     status
     return
   fi
 
-  # Modo paralelo: subnets, DNS y peers WireGuard se quedan secuenciales a propósito.
-  #   - Subnets: 'az network vnet subnet create' concurrentes sobre la MISMA VNet suelen chocar
-  #     con 409 AnotherOperationInProgress en Azure -- crear todas antes de paralelizar evita esa
-  #     carrera.
-  #   - DNS (sync_lab_dns) y peers WireGuard: ambos corren 'az vm run-command invoke' contra
-  #     vm-wg-gateway, que es de UN SOLO HILO por VM -- invocaciones concurrentes contra la misma
-  #     VM se serializan o fallan con conflicto de operacion en curso. Regla general, no solo de
-  #     los peers: TODA escritura sobre vm-wg-gateway va en un paso secuencial (ver
-  #     docs/plans/internal-dns.md "Mecanismo de escritura de la zona y paralelismo").
-  # Lo que sí se paraleliza (que es lo lento: generar YAML + esperar 4 IPs por equipo) es
-  # deploy_team_workload, con tope de concurrencia via job control de bash.
+  # Parallel mode: subnets, DNS and WireGuard peers intentionally stay sequential.
+  #   - Subnets: concurrent 'az network vnet subnet create' on the SAME VNet often collide
+  #     with 409 AnotherOperationInProgress in Azure -- creating all before parallelizing avoids that
+  #     race.
+  #   - DNS (sync_lab_dns) and WireGuard peers: both run 'az vm run-command invoke' against
+  #     vm-wg-gateway, which is SINGLE-THREADED per VM -- concurrent invocations against the same
+  #     VM serialize or fail with operation-in-progress conflict. General rule, not just for
+  #     peers: ALL writes to vm-wg-gateway go in a sequential step (see
+  #     docs/plans/internal-dns.md "Zone write mechanism and parallelism").
+  # What DOES parallelize (the slow part: generating YAML + waiting for 4 IPs per team) is
+  # deploy_team_workload, with concurrency limit via bash job control.
   require_team_prereqs
 
-  echo "== Desplegando equipos ${start}..${end} (paralelo x${concurrency}) =="
-  echo "== Paso 1: subredes (secuencial, evita 409 de Azure en la misma VNet) =="
+  echo "== Deploying teams ${start}..${end} (parallel x${concurrency}) =="
+  echo "== Step 1: subnets (sequential, avoids Azure 409 on same VNet) =="
   local team
   for (( team = start; team <= end; team++ )); do
     add_team_subnet "$team"
   done
 
   echo ""
-  echo "== Paso 2: contenedores por equipo (paralelo x${concurrency}) =="
+  echo "== Step 2: containers per team (parallel x${concurrency}) =="
   local failed_file
   failed_file="$(mktemp)"
   for (( team = start; team <= end; team++ )); do
@@ -404,50 +403,50 @@ add_team_range() {
 
   if [[ -s "$failed_file" ]]; then
     echo ""
-    echo "[ERROR] equipos que fallaron: $(sort -n "$failed_file" | xargs)"
-    echo "        revisa sus contenedores y vuelve a correr 'add-team <N>' solo para esos."
+    echo "[ERROR] teams that failed: $(sort -n "$failed_file" | xargs)"
+    echo "        check their containers and re-run 'add-team <N>' for those only."
     rm -f "$failed_file"
     exit 1
   fi
   rm -f "$failed_file"
 
-  # Paso 2.5: UN solo push de DNS para todo el rango, no uno por equipo -- O(1), no O(N). Cada
-  # deploy_team_workload de arriba ya escribio su team<N>.hosts local (sin tocar el gateway);
-  # aqui se concatenan todos y se empujan en una sola invocacion de run-command. Va antes de los
-  # peers (paso 3) porque ambos tocan vm-wg-gateway y esa VM solo procesa un run-command a la vez.
+  # Step 2.5: ONE DNS push for entire range, not per-team -- O(1), not O(N). Each
+  # deploy_team_workload above already wrote its team<N>.hosts locally (without touching gateway);
+  # here they're concatenated and pushed in a single run-command invocation. Goes before
+  # peers (step 3) because both touch vm-wg-gateway and that VM processes one run-command at a time.
   echo ""
-  echo "== Paso 2.5: sincronizando DNS (1 invocacion para ${start}..${end}) =="
+  echo "== Step 2.5: syncing DNS (1 invocation for ${start}..${end}) =="
   sync_lab_dns
 
   echo ""
-  echo "== Paso 3: peers WireGuard (secuencial, evita chocar sobre vm-wg-gateway) =="
+  echo "== Step 3: WireGuard peers (sequential, avoids collision on vm-wg-gateway) =="
   for (( team = start; team <= end; team++ )); do
     create_wg_team_peer "$team"
   done
 
   echo ""
-  echo "== LISTO: equipos ${start}..${end} desplegados (paralelo x${concurrency}) =="
+  echo "== DONE: teams ${start}..${end} deployed (parallel x${concurrency}) =="
   status
 }
 
 # ---------------------------------------------------------------------------
-# Estado y destrucción
+# Status and destruction
 # ---------------------------------------------------------------------------
 
 # ---------------------------------------------------------------------------
-# Funciones — VM del wiki (snet-dmz-vm, 10.51.0.0/24)
+# Functions — wiki VM (snet-dmz-vm, 10.51.0.0/24)
 # ---------------------------------------------------------------------------
 #
-# Validado end-to-end 2026-08-08. Ver docs/plans/wiki-on-vm.md para detalles.
-# Cuota de VM desbloqueada tras upgrade a Pay-As-You-Go (10 vCPUs StandardDsv7Family).
+# Validated end-to-end 2026-08-08. See docs/plans/wiki-on-vm.md for details.
+# VM quota unblocked after upgrade to Pay-As-You-Go (10 vCPUs StandardDsv7Family).
 create_wiki_vm() {
   local vm_size="${WIKI_VM_SIZE:-Standard_D2s_v7}"
 
-  echo "== VM del wiki (validado 2026-08-08), ver docs/plans/wiki-on-vm.md =="
-  echo "== Generando docker-compose (yamls/generate-wiki-vm.sh) =="
+  echo "== Wiki VM (validated 2026-08-08), see docs/plans/wiki-on-vm.md =="
+  echo "== Generating docker-compose (yamls/generate-wiki-vm.sh) =="
   LAB_DOMAIN="$LAB_DOMAIN" "${YAMLS_DIR}/generate-wiki-vm.sh"
 
-  echo "== az vm create: vm-wiki (${vm_size}, snet-dmz-vm, sin IP publica) =="
+  echo "== az vm create: vm-wiki (${vm_size}, snet-dmz-vm, no public IP) =="
   az vm create \
     --resource-group "$RG" \
     --name vm-wiki \
@@ -462,22 +461,22 @@ create_wiki_vm() {
     --custom-data "${YAMLS_DIR}/wiki-vm/cloud-init.yaml" \
     --output table
 
-  echo "== Esperando a que Docker quede listo (cloud-init) =="
+  echo "== Waiting for Docker to be ready (cloud-init) =="
   local tries=0 max_tries=30
   until az vm run-command invoke --resource-group "$RG" --name vm-wiki \
           --command-id RunShellScript --scripts "docker version" \
           --query "value[0].message" --output tsv 2>/dev/null | grep -q "Server:"; do
     tries=$((tries + 1))
     if (( tries >= max_tries )); then
-      echo "[ERROR] docker no quedó listo tras $((max_tries * 15 / 60)) min. Revisa manualmente:" >&2
+      echo "[ERROR] docker not ready after $((max_tries * 15 / 60)) min. Check manually:" >&2
       echo "  az vm run-command invoke -g ${RG} -n vm-wiki --command-id RunShellScript --scripts 'cloud-init status --long'" >&2
       exit 1
     fi
-    echo "  ... docker aún no listo (intento ${tries}/${max_tries}), esperando 15s"
+    echo "  ... docker not ready yet (attempt ${tries}/${max_tries}), waiting 15s"
     sleep 15
   done
 
-  echo "== Copiando docker-compose.yml a la VM y desplegando (wiki + wiki-db) =="
+  echo "== Copying docker-compose.yml to VM and deploying (wiki + wiki-db) =="
   local compose_b64
   compose_b64="$(base64 -w0 "${YAMLS_DIR}/generated/wiki-vm-docker-compose.yml")"
   az vm run-command invoke \
@@ -489,52 +488,52 @@ create_wiki_vm() {
   local vm_ip
   vm_ip="$(az vm list-ip-addresses -g "$RG" -n vm-wiki --query "[0].virtualMachine.network.privateIpAddresses[0]" --output tsv)"
 
-  echo "== Registrando wiki.dmz en el DNS del lab =="
+  echo "== Registering wiki.dmz in lab DNS =="
   RESOURCE_GROUP="$RG" LAB_DOMAIN="$LAB_DOMAIN" WG_GW_TUNNEL_IP="$WG_GW_TUNNEL_IP" \
     "${YAMLS_DIR}/generate-dns-hosts.sh" dmz
   sync_lab_dns
 
   echo ""
-  echo "== VM del wiki desplegada (IP privada: ${vm_ip}) — Validada 2026-08-08, ver docs/plans/wiki-on-vm.md =="
+  echo "== Wiki VM deployed (private IP: ${vm_ip}) — Validated 2026-08-08, see docs/plans/wiki-on-vm.md =="
   echo "  az vm run-command invoke -g ${RG} -n vm-wiki --command-id RunShellScript --scripts 'docker compose -f /opt/wiki/docker-compose.yml ps'"
 }
 
 # ---------------------------------------------------------------------------
-# Funciones — VM de CTFd (snet-dmz-vm, comparte subred con vm-wiki)
+# Functions — CTFd VM (snet-dmz-vm, shares subnet with vm-wiki)
 # ---------------------------------------------------------------------------
 #
-# F2 de docs/plans/ctfd-deployment.md. Mismo patrón que create_wiki_vm(): cloud-init instala
-# Docker (+ python3-pip aquí), se empuja el bundle generado (docker-compose.yml +
-# conf/nginx/http.conf + seed/*) vía 'az vm run-command invoke'. A diferencia del wiki, los
-# secretos SÍ vienen de yamls/.env.secrets (bloque CTFD_*) -- decisión explícita del plan, ver
+# F2 of docs/plans/ctfd-deployment.md. Same pattern as create_wiki_vm(): cloud-init installs
+# Docker (+ python3-pip here), generated bundle (docker-compose.yml +
+# conf/nginx/http.conf + seed/*) is pushed via 'az vm run-command invoke'. Unlike wiki, secrets
+# DO come from yamls/.env.secrets (CTFD_* block) -- explicit plan decision, see
 # generate-ctfd-vm.sh.
 #
-# Al final corre, en orden, dos scripts vendored frescos desde ../sabana-corp-CTFd por
-# generate-ctfd-vm.sh -- ninguno depende de que el operador esté conectado al túnel VPN admin:
-#   1. seed_setup.py -- completa el wizard de /setup (nombre del evento, modo equipos, cuenta
-#      admin) DENTRO del contenedor ctfd ('docker compose exec'), porque CTFd bloquea CUALQUIER
-#      request -- incluida la API -- hasta que /setup esté hecho. No usa HTTP/CSRF: escribe
-#      directo contra los modelos de CTFd con contexto de Flask.
-#   2. seed_challenges.py -- carga challenges/flags contra la API REST, DESDE el host de la VM
-#      (http://localhost), autenticado con CTFD_PRESET_ADMIN_TOKEN (yamls/.env.secrets): CTFd lo
-#      acepta como Access Token de un admin que crea al vuelo (ver PRESET_ADMIN_TOKEN en
-#      templates/ctfd-compose.yml.tpl), así que tampoco hace falta generar un token a mano por
-#      la UI.
+# Finally runs, in order, two scripts fresh-vendored from ../sabana-corp-CTFd by
+# generate-ctfd-vm.sh -- neither requires the operator to be connected to admin VPN tunnel:
+#   1. seed_setup.py -- completes /setup wizard (event name, team mode, admin account)
+#      INSIDE the ctfd container ('docker compose exec'), because CTFd blocks ANY
+#      request -- including API -- until /setup is done. Doesn't use HTTP/CSRF: writes
+#      directly to CTFd models with Flask context.
+#   2. seed_challenges.py -- loads challenges/flags against REST API, FROM the VM host
+#      (http://localhost), authenticated with CTFD_PRESET_ADMIN_TOKEN (yamls/.env.secrets): CTFd
+#      accepts it as an Access Token for an admin created on-the-fly (see PRESET_ADMIN_TOKEN in
+#      templates/ctfd-compose.yml.tpl), so no need to generate a token manually via
+#      the UI.
 create_ctfd_vm() {
   local vm_size="${CTFD_VM_SIZE:-Standard_D2s_v7}"
 
-  echo "== VM de CTFd (docs/plans/ctfd-deployment.md, F2) =="
+  echo "== CTFd VM (docs/plans/ctfd-deployment.md, F2) =="
   require_dockerhub_env
 
   local secrets_file="${YAMLS_DIR}/.env.secrets"
-  [[ -f "$secrets_file" ]] || { echo "[ERROR] falta ${secrets_file}."; exit 1; }
+  [[ -f "$secrets_file" ]] || { echo "[ERROR] missing ${secrets_file}."; exit 1; }
   set -a
   # shellcheck disable=SC1090
   source "$secrets_file"
   set +a
-  : "${CTFD_PRESET_ADMIN_TOKEN:?Falta CTFD_PRESET_ADMIN_TOKEN en yamls/.env.secrets}"
+  : "${CTFD_PRESET_ADMIN_TOKEN:?Missing CTFD_PRESET_ADMIN_TOKEN in yamls/.env.secrets}"
 
-  echo "== az vm create: vm-ctfd (${vm_size}, snet-dmz-vm, sin IP publica) =="
+  echo "== az vm create: vm-ctfd (${vm_size}, snet-dmz-vm, no public IP) =="
   az vm create \
     --resource-group "$RG" \
     --name vm-ctfd \
@@ -552,31 +551,30 @@ create_ctfd_vm() {
   local vm_ip
   vm_ip="$(az vm list-ip-addresses -g "$RG" -n vm-ctfd --query "[0].virtualMachine.network.privateIpAddresses[0]" --output tsv)"
 
-  # La IP se conoce recién ahora (tras 'az vm create'), así que el bundle se genera DESPUÉS de
-  # crear la VM, no antes -- CTFD_VM_IP entra a TRUSTED_HOSTS (ver generate-ctfd-vm.sh) para que
-  # acceder por IP directa (no solo por el FQDN del DNS interno) no tire 500. Necesario porque el
-  # split-DNS de WireGuard no es confiable en clientes Linux (ver docs/plans/internal-dns.md) --
-  # encontrado en la validación real 2026-08-11, un operador en Linux navegó por IP y CTFd lo
-  # rechazó antes de este fix.
-  echo "== Generando bundle (yamls/generate-ctfd-vm.sh) =="
+  # IP is known only now (after 'az vm create'), so bundle is generated AFTER
+  # VM creation, not before -- CTFD_VM_IP goes into TRUSTED_HOSTS (see generate-ctfd-vm.sh) so
+  # accessing by direct IP (not just by internal DNS FQDN) doesn't return 500. Needed because
+  # WireGuard split-DNS is unreliable on Linux clients (see docs/plans/internal-dns.md) --
+  # found in real validation 2026-08-11, operator on Linux browsed by IP and CTFd rejected it before this fix.
+  echo "== Generating bundle (yamls/generate-ctfd-vm.sh) =="
   LAB_DOMAIN="$LAB_DOMAIN" CTFD_VM_IP="$vm_ip" "${YAMLS_DIR}/generate-ctfd-vm.sh"
 
-  echo "== Esperando a que Docker + pip queden listos (cloud-init) =="
+  echo "== Waiting for Docker + pip to be ready (cloud-init) =="
   local tries=0 max_tries=30
   until az vm run-command invoke --resource-group "$RG" --name vm-ctfd \
           --command-id RunShellScript --scripts "docker version && python3 -m pip --version" \
           --query "value[0].message" --output tsv 2>/dev/null | grep -q "Server:"; do
     tries=$((tries + 1))
     if (( tries >= max_tries )); then
-      echo "[ERROR] docker/pip no quedaron listos tras $((max_tries * 15 / 60)) min. Revisa manualmente:" >&2
+      echo "[ERROR] docker/pip not ready after $((max_tries * 15 / 60)) min. Check manually:" >&2
       echo "  az vm run-command invoke -g ${RG} -n vm-ctfd --command-id RunShellScript --scripts 'cloud-init status --long'" >&2
       exit 1
     fi
-    echo "  ... vm-ctfd aún no lista (intento ${tries}/${max_tries}), esperando 15s"
+    echo "  ... vm-ctfd not ready yet (attempt ${tries}/${max_tries}), waiting 15s"
     sleep 15
   done
 
-  echo "== Copiando el bundle a vm-ctfd, instalando deps del seed y desplegando (nginx + ctfd + db + cache) =="
+  echo "== Copying bundle to vm-ctfd, installing seed deps and deploying (nginx + ctfd + db + cache) =="
   local bundle_b64
   bundle_b64="$(tar -C "${YAMLS_DIR}/generated/ctfd" -czf - . | base64 -w0)"
   az vm run-command invoke \
@@ -587,21 +585,21 @@ create_ctfd_vm() {
       cd /opt/ctfd && docker compose up -d" \
     --output table
 
-  echo "== Registrando ctfd.dmz en el DNS del lab =="
+  echo "== Registering ctfd.dmz in lab DNS =="
   RESOURCE_GROUP="$RG" LAB_DOMAIN="$LAB_DOMAIN" WG_GW_TUNNEL_IP="$WG_GW_TUNNEL_IP" \
     "${YAMLS_DIR}/generate-dns-hosts.sh" dmz
   sync_lab_dns
 
-  # 'az vm run-command invoke' devuelve exit 0 y "ProvisioningState/succeeded" AUNQUE el script
-  # remoto termine con un exit code distinto de cero -- el resultado real vive solo en el texto de
-  # value[0].message (bloques [stdout]/[stderr]). Encontrado en la primera corrida real
-  # (2026-08-11): un curl -f fallando y un seed_challenges.py con traceback pasaron ambos
-  # desapercibidos porque el código de abajo confiaba en el exit code de 'az' o usaba
-  # '--output table' sin inspeccionar el mensaje. De aquí en adelante: capturar el mensaje,
-  # imprimirlo siempre (nada de '--output table' silencioso) y decidir éxito/error por su
-  # contenido, no por $?.
+  # 'az vm run-command invoke' returns exit 0 and "ProvisioningState/succeeded" EVEN IF the remote script
+  # exits with a non-zero code -- the real result only lives in the text of
+  # value[0].message (blocks [stdout]/[stderr]). Found in first real run
+  # (2026-08-11): a failing curl -f and seed_challenges.py with traceback both passed
+  # unnoticed because code below relied on 'az' exit code or used
+  # '--output table' without inspecting the message. From now on: capture message,
+  # always print it (no silent '--output table') and decide success/error by its
+  # content, not by $?.
 
-  echo "== Esperando a que CTFd responda en localhost (dentro de vm-ctfd) =="
+  echo "== Waiting for CTFd to respond on localhost (inside vm-ctfd) =="
   tries=0; max_tries=20
   local http_code
   while :; do
@@ -613,15 +611,15 @@ create_ctfd_vm() {
     [[ "$http_code" =~ ^(2|3)[0-9][0-9]$ ]] && break
     tries=$((tries + 1))
     if (( tries >= max_tries )); then
-      echo "[ERROR] CTFd no respondió (último código HTTP: '${http_code:-sin respuesta}') tras $((max_tries * 15 / 60)) min. Revisa manualmente:" >&2
+      echo "[ERROR] CTFd did not respond (last HTTP code: '${http_code:-no response}') after $((max_tries * 15 / 60)) min. Check manually:" >&2
       echo "  az vm run-command invoke -g ${RG} -n vm-ctfd --command-id RunShellScript --scripts 'docker compose -f /opt/ctfd/docker-compose.yml logs --tail 100'" >&2
       exit 1
     fi
-    echo "  ... ctfd aún no responde (código '${http_code:-sin respuesta}', intento ${tries}/${max_tries}), esperando 15s"
+    echo "  ... ctfd not responding yet (code '${http_code:-no response}', attempt ${tries}/${max_tries}), waiting 15s"
     sleep 15
   done
 
-  echo "== Completando /setup (seed_setup.py, corre dentro del contenedor ctfd via 'docker compose exec') =="
+  echo "== Completing /setup (seed_setup.py, runs inside ctfd container via 'docker compose exec') =="
   local setup_msg
   setup_msg="$(az vm run-command invoke \
     --resource-group "$RG" --name vm-ctfd \
@@ -629,12 +627,12 @@ create_ctfd_vm() {
     --scripts "cd /opt/ctfd && docker compose exec -T ctfd python3 - < seed/seed_setup.py" \
     --query "value[0].message" --output tsv 2>/dev/null)"
   echo "$setup_msg"
-  if ! grep -qE "CTFd (ya esta )?configurado" <<<"$setup_msg"; then
-    echo "[ERROR] seed_setup.py no confirmó éxito (ver mensaje arriba)." >&2
+  if ! grep -qE "CTFd (is already )?configured" <<<"$setup_msg"; then
+    echo "[ERROR] seed_setup.py did not confirm success (see message above)." >&2
     exit 1
   fi
 
-  echo "== Cargando challenges/flags (seed_challenges.py, vendored desde sabana-corp-CTFd) =="
+  echo "== Loading challenges/flags (seed_challenges.py, vendored from sabana-corp-CTFd) =="
   local publish_flag=""
   [[ "${CTFD_SEED_PUBLISH:-}" == "1" ]] && publish_flag="--publish"
   local seed_msg
@@ -645,44 +643,43 @@ create_ctfd_vm() {
     --query "value[0].message" --output tsv 2>/dev/null)"
   echo "$seed_msg"
   if grep -q "^error:" <<<"$seed_msg" || ! grep -q "^OK  " <<<"$seed_msg"; then
-    echo "[ERROR] seed_challenges.py no confirmó éxito (ver mensaje arriba)." >&2
+    echo "[ERROR] seed_challenges.py did not confirm success (see message above)." >&2
     exit 1
   fi
 
   echo ""
-  echo "== VM de CTFd desplegada (IP privada: ${vm_ip}) — ver docs/plans/ctfd-deployment.md (F2) =="
-  echo "  http://${vm_ip} o http://ctfd.dmz.${LAB_DOMAIN} (via tunel VPN)"
-  echo "  admin: ${CTFD_PRESET_ADMIN_EMAIL} / (password en yamls/.env.secrets, CTFD_PRESET_ADMIN_PASSWORD)"
+  echo "== CTFd VM deployed (private IP: ${vm_ip}) — see docs/plans/ctfd-deployment.md (F2) =="
+  echo "  http://${vm_ip} or http://ctfd.dmz.${LAB_DOMAIN} (via VPN tunnel)"
+  echo "  admin: ${CTFD_PRESET_ADMIN_EMAIL} / (password in yamls/.env.secrets, CTFD_PRESET_ADMIN_PASSWORD)"
   if [[ -n "$publish_flag" ]]; then
-    echo "  Challenges cargados y PUBLICADOS (CTFD_SEED_PUBLISH=1)."
+    echo "  Challenges loaded and PUBLISHED (CTFD_SEED_PUBLISH=1)."
   else
-    echo "  Challenges cargados OCULTOS -- correr con CTFD_SEED_PUBLISH=1 para publicarlos, o desde la UI."
+    echo "  Challenges loaded HIDDEN -- run with CTFD_SEED_PUBLISH=1 to publish them, or from UI."
   fi
   echo "  az vm run-command invoke -g ${RG} -n vm-ctfd --command-id RunShellScript --scripts 'docker compose -f /opt/ctfd/docker-compose.yml ps'"
 }
 
 # ---------------------------------------------------------------------------
-# Funciones — VM de monitoreo (snet-mgmt, 10.99.0.0/24)
+# Functions — monitoring VM (snet-mgmt, 10.99.0.0/24)
 # ---------------------------------------------------------------------------
 #
-# F1+F2 de docs/plans/observability-monitoring.md: Prometheus + blackbox_exporter (sondeo externo,
-# cero cambios en las imagenes de los retos) + Grafana (dashboard "muro de equipos" + alertas
-# Unified sin contact points) + node_exporter (metricas propias + textfile collector). Mismo
-# patron que create_wiki_vm(): cloud-init instala Docker (y aqui ademas Azure CLI), y el resto se
-# empuja via 'az vm run-command invoke' -- solo que aca es un bundle entero (tar+base64), no un
-# solo archivo, porque el stack tiene mas piezas (prometheus.yml, blackbox.yml, provisioning de
-# Grafana, el script de descubrimiento).
+# F1+F2 of docs/plans/observability-monitoring.md: Prometheus + blackbox_exporter (external probing,
+# zero changes to challenge images) + Grafana (dashboard "Team Wall" + Unified alerts without contact points) + node_exporter (own metrics + textfile collector). Same
+# pattern as create_wiki_vm(): cloud-init installs Docker (and also Azure CLI here), rest
+# is pushed via 'az vm run-command invoke' -- except here it's a complete bundle (tar+base64), not a
+# single file, because the stack has more pieces (prometheus.yml, blackbox.yml, Grafana provisioning,
+# discovery script).
 #
-# Managed identity con Reader SOLO sobre este Resource Group (nunca sobre la suscripcion) -- ver
-# "Riesgos: la managed identity es el activo mas valioso de snet-mgmt" en el plan.
+# Managed identity with Reader ONLY over this Resource Group (never over subscription) -- see
+# "Risks: the managed identity is the most valuable asset of snet-mgmt" in the plan.
 create_monitor_vm() {
   local vm_size="${MONITOR_VM_SIZE:-Standard_D2s_v7}"
 
-  echo "== VM de monitoreo (docs/plans/observability-monitoring.md, F1+F2) =="
-  echo "== Generando bundle (yamls/generate-monitor.sh) =="
+  echo "== Monitoring VM (docs/plans/observability-monitoring.md, F1+F2) =="
+  echo "== Generating bundle (yamls/generate-monitor.sh) =="
   RESOURCE_GROUP="$RG" "${YAMLS_DIR}/generate-monitor.sh"
 
-  echo "== az vm create: vm-monitor (${vm_size}, snet-mgmt, sin IP publica, managed identity) =="
+  echo "== az vm create: vm-monitor (${vm_size}, snet-mgmt, no public IP, managed identity) =="
   az vm create \
     --resource-group "$RG" \
     --name vm-monitor \
@@ -698,43 +695,43 @@ create_monitor_vm() {
     --custom-data "${YAMLS_DIR}/monitor/cloud-init.yaml" \
     --output table
 
-  echo "== Asignando rol Reader (alcance: solo este Resource Group) a la managed identity =="
+  echo "== Assigning Reader role (scope: only this Resource Group) to managed identity =="
   local principal_id sub_id tries max_tries
   principal_id="$(az vm identity show --resource-group "$RG" --name vm-monitor --query principalId --output tsv)"
   sub_id="$(get_subscription_id)"
   tries=0; max_tries=10
-  # Reintento: una identidad recien creada en Entra ID puede tardar unos segundos en propagar
-  # antes de que 'role assignment create' la reconozca (PrincipalNotFound transitorio, no un
-  # error real de permisos).
+  # Retry: newly created identity in Entra ID may take a few seconds to propagate
+  # before 'role assignment create' recognizes it (transient PrincipalNotFound, not a
+  # real permissions error).
   until az role assignment create \
           --assignee-object-id "$principal_id" --assignee-principal-type ServicePrincipal \
           --role Reader --scope "/subscriptions/${sub_id}/resourceGroups/${RG}" \
           --output none 2>/dev/null; do
     tries=$((tries + 1))
     if (( tries >= max_tries )); then
-      echo "[ERROR] no se pudo asignar el rol Reader tras ${max_tries} intentos." >&2
+      echo "[ERROR] could not assign Reader role after ${max_tries} attempts." >&2
       exit 1
     fi
-    echo "  ... identidad aun no propagada (intento ${tries}/${max_tries}), esperando 10s"
+    echo "  ... identity not yet propagated (attempt ${tries}/${max_tries}), waiting 10s"
     sleep 10
   done
 
-  echo "== Esperando a que Docker + Azure CLI queden listos (cloud-init) =="
+  echo "== Waiting for Docker + Azure CLI to be ready (cloud-init) =="
   tries=0; max_tries=30
   until az vm run-command invoke --resource-group "$RG" --name vm-monitor \
           --command-id RunShellScript --scripts "docker version && az version" \
           --query "value[0].message" --output tsv 2>/dev/null | grep -q "Server:"; do
     tries=$((tries + 1))
     if (( tries >= max_tries )); then
-      echo "[ERROR] docker/az cli no quedaron listos tras $((max_tries * 15 / 60)) min. Revisa manualmente:" >&2
+      echo "[ERROR] docker/az cli not ready after $((max_tries * 15 / 60)) min. Check manually:" >&2
       echo "  az vm run-command invoke -g ${RG} -n vm-monitor --command-id RunShellScript --scripts 'cloud-init status --long'" >&2
       exit 1
     fi
-    echo "  ... vm-monitor aun no lista (intento ${tries}/${max_tries}), esperando 15s"
+    echo "  ... vm-monitor not ready yet (attempt ${tries}/${max_tries}), waiting 15s"
     sleep 15
   done
 
-  echo "== Copiando el bundle a vm-monitor y desplegando (prometheus + blackbox + grafana + node-exporter) =="
+  echo "== Copying bundle to vm-monitor and deploying (prometheus + blackbox + grafana + node-exporter) =="
   local bundle_b64
   bundle_b64="$(tar -C "${YAMLS_DIR}/generated/monitor" -czf - . | base64 -w0)"
   az vm run-command invoke \
@@ -753,26 +750,26 @@ create_monitor_vm() {
   vm_ip="$(az vm list-ip-addresses -g "$RG" -n vm-monitor --query "[0].virtualMachine.network.privateIpAddresses[0]" --output tsv)"
 
   echo ""
-  echo "== VM de monitoreo desplegada (IP privada: ${vm_ip}) =="
-  echo "== Grafana: http://${vm_ip}:3000 (admin / GRAFANA_ADMIN_PASSWORD, ver yamls/generate-monitor.sh) =="
-  echo "== Solo alcanzable por el tunel admin de WireGuard (AllowedIPs=10.0.0.0/8 cubre snet-mgmt) =="
-  echo "== NO se registra en el DNS interno a proposito: snet-mgmt no se publica (ver docs/plans/internal-dns.md) =="
-  echo "== Punto ciego conocido: xss-bot sin sonda propia todavia (ver 'El punto ciego: xss-bot' en el plan) =="
+  echo "== Monitoring VM deployed (private IP: ${vm_ip}) =="
+  echo "== Grafana: http://${vm_ip}:3000 (admin / GRAFANA_ADMIN_PASSWORD, see yamls/generate-monitor.sh) =="
+  echo "== Only reachable via WireGuard admin tunnel (AllowedIPs=10.0.0.0/8 covers snet-mgmt) =="
+  echo "== Intentionally NOT registered in internal DNS: snet-mgmt not published (see docs/plans/internal-dns.md) =="
+  echo "== Known blind spot: xss-bot without its own probe yet (see 'The blind spot: xss-bot' in plan) =="
 }
 
 # ---------------------------------------------------------------------------
-# Funciones — Gateway WireGuard (snet-wg-gateway, 10.10.0.0/28)
+# Functions — WireGuard Gateway (snet-wg-gateway, 10.10.0.0/28)
 # ---------------------------------------------------------------------------
 #
-# Validado end-to-end 2026-08-08. Ver docs/plans/wireguard-vpn-gateway.md para detalles.
-# Unico punto de entrada al lab: VM con IP publica + WireGuard (UDP 51820). El control de acceso
-# real (que puede alcanzar cada peer) NO es un NSG -- es iptables en la propia VM, con una regla
-# FORWARD por peer scoped a sus CIDR permitidos y politica DROP por defecto. add-peer.sh.tpl es
-# la unica pieza que aplica esa regla; create_wg_peer la resuelve localmente con envsubst y la
-# manda completa como un solo string a 'az vm run-command invoke'.
+# Validated end-to-end 2026-08-08. See docs/plans/wireguard-vpn-gateway.md for details.
+# Only entry point to lab: VM with public IP + WireGuard (UDP 51820). Real access control
+# (what each peer can reach) is NOT an NSG -- it's iptables on the VM itself, with a
+# FORWARD rule per peer scoped to its allowed CIDRs and DROP policy by default. add-peer.sh.tpl is
+# the only piece that applies that rule; create_wg_peer resolves it locally with envsubst and
+# sends it complete as a single string to 'az vm run-command invoke'.
 
 create_wg_nsg() {
-  echo "== NSG dedicado para snet-wg-gateway: solo UDP 51820 entrante desde Internet =="
+  echo "== Dedicated NSG for snet-wg-gateway: only inbound UDP 51820 from Internet =="
   az network nsg create --resource-group "$RG" --name nsg-wg-gateway --location "$LOCATION" --output none
 
   az network nsg rule create \
@@ -783,21 +780,21 @@ create_wg_nsg() {
     --destination-address-prefixes '*' --destination-port-ranges 51820 \
     --output none
 
-  # Las reglas default de Azure (DenyAllInBound a prioridad 65500) ya cubren todo lo demas --
-  # no hace falta una regla deny explicita. Este NSG queda deliberadamente mas restrictivo que
-  # el default de la VNet (que permite AllowVnetInBound): snet-wg-gateway es la unica subred que
-  # no debe confiar en "cualquier cosa dentro de la VNet" como origen.
+  # Azure default rules (DenyAllInBound at priority 65500) already cover everything else --
+  # no need for explicit deny rule. This NSG is deliberately more restrictive than
+  # VNet default (which allows AllowVnetInBound): snet-wg-gateway is the only subnet that
+  # should not trust "anything within the VNet" as source.
   az network vnet subnet update \
     --resource-group "$RG" --vnet-name "$VNET" --name snet-wg-gateway \
     --network-security-group nsg-wg-gateway --output none
 }
 
-# create_wg_peer <nombre> <tunnel_ip/32> <cidrs_permitidos_separados_por_espacio>
-# Compartida entre el peer admin (deploy_wg_gateway) y los peers de equipo (create_wg_team_peer).
+# create_wg_peer <name> <tunnel_ip/32> <allowed_cidrs_space_separated>
+# Shared between admin peer (deploy_wg_gateway) and team peers (create_wg_team_peer).
 create_wg_peer() {
   local name="$1" tunnel_ip="$2" allowed_cidrs="$3"
 
-  echo "== Peer WireGuard '${name}': generando/aplicando en vm-wg-gateway (tunnel ${tunnel_ip}) =="
+  echo "== WireGuard peer '${name}': generating/applying to vm-wg-gateway (tunnel ${tunnel_ip}) =="
 
   local rendered
   rendered="$(PEER_NAME="$name" TUNNEL_IP="$tunnel_ip" ALLOWED_CIDRS="$allowed_cidrs" \
@@ -812,7 +809,7 @@ create_wg_peer() {
   pubkey="$(grep '^PUBKEY=' <<<"$clean" | cut -d= -f2-)"
 
   if [[ -z "$privkey" || -z "$pubkey" ]]; then
-    echo "[ERROR] no se pudo extraer las keys del peer '${name}'. Salida cruda de run-command:" >&2
+    echo "[ERROR] could not extract keys for peer '${name}'. Raw run-command output:" >&2
     echo "$out" >&2
     exit 1
   fi
@@ -827,12 +824,12 @@ create_wg_peer() {
   gw_ip="$(az vm list-ip-addresses --resource-group "$RG" --name vm-wg-gateway \
     --query "[0].virtualMachine.network.publicIpAddresses[0].ipAddress" --output tsv)"
 
-  # AllowedIPs del cliente != CIDRs de las reglas FORWARD de arriba: el cliente necesita ademas
-  # poder ENVIAR paquetes a WG_GW_TUNNEL_IP (si no, el driver de WireGuard los descarta en el
-  # propio cliente, antes de que lleguen al gateway -- ver docs/plans/internal-dns.md
-  # "Arquitectura de resolución"). El trafico al propio gateway es INPUT, no FORWARD, así que no
-  # necesita una regla iptables nueva -- por eso add-peer.sh.tpl (arriba) sigue recibiendo solo
-  # allowed_cidrs, sin el /32 del DNS.
+  # Client AllowedIPs != FORWARD rule CIDRs above: client additionally needs
+  # to SEND packets to WG_GW_TUNNEL_IP (otherwise WireGuard driver drops them on the
+  # client side, before they reach gateway -- see docs/plans/internal-dns.md
+  # "Resolution architecture"). Traffic to the gateway itself is INPUT, not FORWARD, so no
+  # new iptables rule needed -- that's why add-peer.sh.tpl (above) still only gets
+  # allowed_cidrs, without the DNS /32.
   mkdir -p "$WG_CLIENTS_DIR"
   PEER_NAME="$name" \
     CLIENT_PRIVKEY="$privkey" \
@@ -845,14 +842,14 @@ create_wg_peer() {
     "${YAMLS_DIR}/generate-wg-client.sh"
 }
 
-# Se llama desde deploy_team() al final. Guardado, no bloqueante: si el gateway todavia no
-# existe, el equipo queda igual desplegado (los 4 contenedores ya funcionan solos dentro de la
-# VNet) solo que sin tunel VPN hasta que se corra deploy-wg-gateway y se repita add-team.
+# Called from deploy_team() at the end. Graceful, non-blocking: if gateway doesn't exist yet,
+# team still deploys (4 containers work fine inside VNet) but without VPN tunnel until
+# deploy-wg-gateway is run and add-team is repeated.
 create_wg_team_peer() {
   local team="$1"
   if ! az vm show --resource-group "$RG" --name vm-wg-gateway --output none 2>/dev/null; then
-    echo "[WARN] vm-wg-gateway no existe -- team${team} desplegado, pero SIN acceso VPN todavia."
-    echo "        Corre './lab-azure.sh deploy-wg-gateway' y luego repite 'add-team ${team}' para generar su peer."
+    echo "[WARN] vm-wg-gateway doesn't exist -- team${team} deployed, but WITHOUT VPN access yet."
+    echo "        Run './lab-azure.sh deploy-wg-gateway' then repeat 'add-team ${team}' to generate its peer."
     return 0
   fi
   create_wg_peer "team${team}" "10.200.${team}.2/32" "10.60.${team}.0/24 10.50.0.0/24 10.51.0.0/24"
@@ -861,10 +858,10 @@ create_wg_team_peer() {
 deploy_wg_gateway() {
   local vm_size="${WG_GW_VM_SIZE:-Standard_D2s_v7}"
 
-  echo "== VM del gateway WireGuard (validado 2026-08-08), ver docs/plans/wireguard-vpn-gateway.md =="
+  echo "== WireGuard gateway VM (validated 2026-08-08), see docs/plans/wireguard-vpn-gateway.md =="
   create_wg_nsg
 
-  echo "== az vm create: vm-wg-gateway (${vm_size}, snet-wg-gateway, CON IP publica, IP privada estatica ${WG_GW_PRIVATE_IP}) =="
+  echo "== az vm create: vm-wg-gateway (${vm_size}, snet-wg-gateway, WITH public IP, static private IP ${WG_GW_PRIVATE_IP}) =="
   az vm create \
     --resource-group "$RG" \
     --name vm-wg-gateway \
@@ -881,66 +878,66 @@ deploy_wg_gateway() {
     --custom-data "${YAMLS_DIR}/wg-gateway/cloud-init.yaml" \
     --output table
 
-  echo "== Esperando a que wg0 quede activo (cloud-init) =="
+  echo "== Waiting for wg0 to be active (cloud-init) =="
   local tries=0 max_tries=30
   until az vm run-command invoke --resource-group "$RG" --name vm-wg-gateway \
           --command-id RunShellScript --scripts "systemctl is-active wg-quick@wg0" \
           --query "value[0].message" --output tsv 2>/dev/null | grep -q "^active$"; do
     tries=$((tries + 1))
     if (( tries >= max_tries )); then
-      echo "[ERROR] wg0 no quedó activo tras $((max_tries * 15 / 60)) min. Revisa manualmente:" >&2
+      echo "[ERROR] wg0 not active after $((max_tries * 15 / 60)) min. Check manually:" >&2
       echo "  az vm run-command invoke -g ${RG} -n vm-wg-gateway --command-id RunShellScript --scripts 'cloud-init status --long'" >&2
       exit 1
     fi
-    echo "  ... wg0 aún no activo (intento ${tries}/${max_tries}), esperando 15s"
+    echo "  ... wg0 not active yet (attempt ${tries}/${max_tries}), waiting 15s"
     sleep 15
   done
 
-  echo "== Esperando a que dnsmasq quede activo (cloud-init, ver docs/plans/internal-dns.md) =="
+  echo "== Waiting for dnsmasq to be active (cloud-init, see docs/plans/internal-dns.md) =="
   tries=0
   until az vm run-command invoke --resource-group "$RG" --name vm-wg-gateway \
           --command-id RunShellScript --scripts "systemctl is-active dnsmasq" \
           --query "value[0].message" --output tsv 2>/dev/null | grep -q "^active$"; do
     tries=$((tries + 1))
     if (( tries >= max_tries )); then
-      echo "[ERROR] dnsmasq no quedó activo tras $((max_tries * 15 / 60)) min. Revisa manualmente:" >&2
+      echo "[ERROR] dnsmasq not active after $((max_tries * 15 / 60)) min. Check manually:" >&2
       echo "  az vm run-command invoke -g ${RG} -n vm-wg-gateway --command-id RunShellScript --scripts 'systemctl status dnsmasq; journalctl -u dnsmasq --no-pager -n 50'" >&2
       exit 1
     fi
-    echo "  ... dnsmasq aún no activo (intento ${tries}/${max_tries}), esperando 15s"
+    echo "  ... dnsmasq not active yet (attempt ${tries}/${max_tries}), waiting 15s"
     sleep 15
   done
 
   local gw_ip
   gw_ip="$(az vm list-ip-addresses --resource-group "$RG" --name vm-wg-gateway \
     --query "[0].virtualMachine.network.publicIpAddresses[0].ipAddress" --output tsv)"
-  echo "IP publica del gateway: ${gw_ip}"
+  echo "Gateway public IP: ${gw_ip}"
 
-  echo "== Creando peer admin =="
+  echo "== Creating admin peer =="
   create_wg_peer "admin" "10.200.0.2/32" "10.0.0.0/8"
 
-  # Un gateway recreado (VM perdida/reboot con re-imagen) recupera la zona sin pasos manuales --
-  # la fuente de verdad local (yamls/generated/dns/*.hosts) ya existe si veniamos de un lab con
-  # equipos desplegados.
+  # A recreated gateway (lost VM/reboot with re-imaging) recovers zone without manual steps --
+  # local source of truth (yamls/generated/dns/*.hosts) already exists if we had a lab with
+  # deployed teams.
   sync_lab_dns
 
   echo ""
-  echo "== Gateway WireGuard desplegado. Cliente admin: ${WG_CLIENTS_DIR}/admin.conf =="
-  echo "== DNS interno: ${WG_GW_PRIVATE_IP} (VNet) / ${WG_GW_TUNNEL_IP} (tunel) -- ver docs/plans/internal-dns.md =="
-  echo "== Validado end-to-end 2026-08-08 (ver docs/plans/wireguard-vpn-gateway.md) =="
+  echo "== WireGuard gateway deployed. Admin client: ${WG_CLIENTS_DIR}/admin.conf =="
+  echo "== Internal DNS: ${WG_GW_PRIVATE_IP} (VNet) / ${WG_GW_TUNNEL_IP} (tunnel) -- see docs/plans/internal-dns.md =="
+  echo "== Validated end-to-end 2026-08-08 (see docs/plans/wireguard-vpn-gateway.md) =="
 }
 
 # ---------------------------------------------------------------------------
-# Funciones — DNS interno del lab (dnsmasq en vm-wg-gateway)
+# Functions — lab internal DNS (dnsmasq on vm-wg-gateway)
 # ---------------------------------------------------------------------------
 #
-# Ver docs/plans/internal-dns.md. Regla general: TODA escritura sobre vm-wg-gateway va en un paso
-# secuencial -- 'az vm run-command invoke' es de un solo hilo por VM (misma causa raiz que ya
-# obligo a dejar los peers WireGuard secuenciales en add_team_range()). sync_lab_dns() por eso
-# manda UN solo push por operacion (concatena todos los *.hosts locales), nunca uno por equipo.
+# See docs/plans/internal-dns.md. General rule: ALL writes to vm-wg-gateway go in a sequential step --
+# 'az vm run-command invoke' is single-threaded per VM (same root cause that forces
+# WireGuard peers sequential in add_team_range()). sync_lab_dns() therefore
+# sends ONE push per operation (concatenates all *.hosts locally), never per-team.
 
-# lab_dns_server() -- devuelve WG_GW_PRIVATE_IP si vm-wg-gateway existe, cadena vacia si no. Es lo
-# que decide si las plantillas de contenedor llevan dnsConfig (ver generate-team.sh/generate-dmz.sh).
+# lab_dns_server() -- returns WG_GW_PRIVATE_IP if vm-wg-gateway exists, empty string if not. This is what
+# decides if container templates get dnsConfig (see generate-team.sh/generate-dmz.sh).
 lab_dns_server() {
   if az vm show --resource-group "$RG" --name vm-wg-gateway --output none 2>/dev/null; then
     echo "$WG_GW_PRIVATE_IP"
@@ -949,13 +946,13 @@ lab_dns_server() {
   fi
 }
 
-# sync_lab_dns -- concatena yamls/generated/dns/*.hosts en una sola zona y la empuja al gateway en
-# UNA invocacion de run-command (O(1), no O(N) equipos -- ver "Escalabilidad" en el plan).
-# Guardada y no bloqueante, mismo espiritu que create_wg_team_peer: si el gateway no existe, avisa
-# y sigue -- un lab sin gateway tiene que poder seguir desplegandose igual.
+# sync_lab_dns -- concatenates yamls/generated/dns/*.hosts into single zone and pushes to gateway in
+# ONE run-command invocation (O(1), not O(N) teams -- see "Scalability" in plan).
+# Graceful and non-blocking, same spirit as create_wg_team_peer: if gateway doesn't exist, warns
+# and continues -- lab without gateway must still be deployable.
 sync_lab_dns() {
   if ! az vm show --resource-group "$RG" --name vm-wg-gateway --output none 2>/dev/null; then
-    echo "[WARN] vm-wg-gateway no existe -- se omite sync_lab_dns (sin gateway no hay DNS que sincronizar)."
+    echo "[WARN] vm-wg-gateway doesn't exist -- skipping sync_lab_dns (no gateway means no DNS to sync)."
     return 0
   fi
 
@@ -972,11 +969,11 @@ sync_lab_dns() {
   ) 200>"$lockfile"
 
   if [[ ! -s "$zonefile" ]]; then
-    echo "[WARN] no hay registros DNS locales que sincronizar todavia (yamls/generated/dns/*.hosts vacio)."
+    echo "[WARN] no local DNS records to sync yet (yamls/generated/dns/*.hosts empty)."
     return 0
   fi
 
-  echo "== sync_lab_dns: empujando $(grep -vcE '^\s*(#.*)?$' "$zonefile" || true) registros a vm-wg-gateway (1 invocacion) =="
+  echo "== sync_lab_dns: pushing $(grep -vcE '^\s*(#.*)?$' "$zonefile" || true) records to vm-wg-gateway (1 invocation) =="
   local rendered out
   rendered="$(ZONE_NAME="lab" ZONE_B64="$(base64 -w0 "$zonefile")" \
     envsubst '${ZONE_NAME} ${ZONE_B64}' < "${YAMLS_DIR}/wg-gateway/remote/apply-dns.sh.tpl")"
@@ -987,30 +984,30 @@ sync_lab_dns() {
   sed -n '/\[stdout\]/,/\[stderr\]/{//!p}' <<<"$out"
 
   if ! grep -q '^OK registros=' <<<"$out"; then
-    echo "[ERROR] sync_lab_dns: el gateway no confirmo la instalacion. Salida cruda:" >&2
+    echo "[ERROR] sync_lab_dns: gateway did not confirm installation. Raw output:" >&2
     echo "$out" >&2
     exit 1
   fi
 }
 
-# rebuild_lab_dns_from_azure -- reconstruye TODOS los *.hosts desde el estado real de Azure (una
-# sola az container list) y los empuja. Comando de reparacion (dns-sync --from-azure) y el que se
-# corre antes del evento para garantizar que la zona refleja Azure, no la memoria del operador.
+# rebuild_lab_dns_from_azure -- rebuilds ALL *.hosts from actual Azure state (single
+# az container list) and pushes them. Repair command (dns-sync --from-azure) and the one to
+# run before event to ensure zone reflects Azure, not operator's memory.
 rebuild_lab_dns_from_azure() {
-  echo "== Reconstruyendo la zona DNS completa desde Azure (dns-sync --from-azure) =="
+  echo "== Rebuilding complete DNS zone from Azure (dns-sync --from-azure) =="
   RESOURCE_GROUP="$RG" LAB_DOMAIN="$LAB_DOMAIN" WG_GW_TUNNEL_IP="$WG_GW_TUNNEL_IP" \
     "${YAMLS_DIR}/generate-dns-hosts.sh" all-from-azure
   sync_lab_dns
 }
 
-# dns_check <fqdn> -- resuelve <fqdn> preguntando al gateway y lo compara con la IP real que tiene
-# Azure para el container group/VM correspondiente (deriva el nombre del container group del FQDN
-# via la regla de derivacion inversa). Es el chequeo que se corre antes de abrir el evento.
+# dns_check <fqdn> -- resolves <fqdn> by querying the gateway and compares with real IP that
+# Azure has for the corresponding container group/VM (derives container group name from FQDN
+# via reverse derivation rule). This is the check that runs before opening event.
 dns_check() {
-  local fqdn="${1:?Uso: $0 dns-check <fqdn.sabanacorp.internal>}"
+  local fqdn="${1:?Usage: $0 dns-check <fqdn.sabanacorp.internal>}"
 
   if ! az vm show --resource-group "$RG" --name vm-wg-gateway --output none 2>/dev/null; then
-    echo "[ERROR] vm-wg-gateway no existe -- no hay DNS que consultar."
+    echo "[ERROR] vm-wg-gateway doesn't exist -- no DNS to query."
     exit 1
   fi
 
@@ -1021,15 +1018,14 @@ dns_check() {
     | sed -n '/\[stdout\]/,/\[stderr\]/{//!p}' | tr -d '\r' | head -n1)"
 
   if [[ -z "$resolved" ]]; then
-    echo "[FALLO] ${fqdn} no resuelve desde el gateway."
+    echo "[FAIL] ${fqdn} does not resolve from gateway."
     exit 1
   fi
 
-  echo "${fqdn} -> ${resolved} (segun el gateway)"
+  echo "${fqdn} -> ${resolved} (according to gateway)"
 
-  # Comparacion best-effort contra Azure: solo para nombres team<N>.<svc> o dmz.<svc>, que son los
-  # que este script sabe derivar. Otros FQDN (alias narrativos, infra) solo se resuelven, sin
-  # comparar.
+  # Best-effort comparison against Azure: only for team<N>.<svc> or dmz.<svc> names, which this
+  # script knows how to derive. Other FQDNs (narrative aliases, infra) resolve only, no comparison.
   local svc team real_ip cg_name=""
   if [[ "$fqdn" =~ ^([a-z0-9-]+)\.team([0-9]+)\.${LAB_DOMAIN//./\\.}$ ]]; then
     svc="${BASH_REMATCH[1]}"; team="${BASH_REMATCH[2]}"
@@ -1044,31 +1040,31 @@ dns_check() {
       --query ipAddress.ip --output tsv 2>/dev/null || true)"
     if [[ -n "$real_ip" ]]; then
       if [[ "$real_ip" == "$resolved" ]]; then
-        echo "OK: coincide con la IP real de Azure (${cg_name})."
+        echo "OK: matches Azure real IP (${cg_name})."
       else
-        echo "[DESAJUSTE] Azure tiene ${cg_name}=${real_ip}, pero el DNS resuelve ${resolved}. Corre: $0 dns-sync --from-azure"
+        echo "[MISMATCH] Azure has ${cg_name}=${real_ip}, but DNS resolves ${resolved}. Run: $0 dns-sync --from-azure"
         exit 1
       fi
     fi
   fi
 }
 
-# az container list nunca trae instanceView poblado (limitación de la API/CLI, no filtro
-# nuestro) -- provisioningState tampoco sirve solo, un container group puede quedar en
-# 'Succeeded' con un contenedor en CrashLoopBackOff adentro (visto con dmz-wiki en ACI). Por
-# eso el estado real hay que pedirlo por contenedor con 'az container show'.
+# az container list never returns populated instanceView (API/CLI limitation, not our filter)
+# -- provisioningState alone isn't enough either, a container group can stay in
+# 'Succeeded' with a container in CrashLoopBackOff inside (seen with dmz-wiki on ACI). That's why
+# real state must be queried per-container with 'az container show'.
 print_container_states() {
   local prefix="$1"
   local names
   names="$(az container list --resource-group "$RG" --query "[?starts_with(name, '${prefix}')].name" --output tsv 2>/dev/null | sort || true)"
   if [[ -z "$names" ]]; then
-    echo "  (ninguno desplegado todavía)"
+    echo "  (none deployed yet)"
     return
   fi
-  printf "  %-22s %-18s %-15s %s\n" "NOMBRE" "ESTADO" "IP" "RESTARTS"
+  printf "  %-22s %-18s %-15s %s\n" "NAME" "STATE" "IP" "RESTARTS"
   local name
-  while IFS=$'\t' read -r nombre estado ip restarts; do
-    printf "  %-22s %-18s %-15s %s\n" "$nombre" "${estado:-?}" "${ip:-?}" "${restarts:-0}"
+  while IFS=$'\t' read -r cname state ip restarts; do
+    printf "  %-22s %-18s %-15s %s\n" "$cname" "${state:-?}" "${ip:-?}" "${restarts:-0}"
   done < <(
     for name in $names; do
       az container show --resource-group "$RG" --name "$name" \
@@ -1079,7 +1075,7 @@ print_container_states() {
 }
 
 status() {
-  echo "== DMZ compartida (snet-dmz-shared) =="
+  echo "== Shared DMZ (snet-dmz-shared) =="
   print_container_states "dmz-"
 
   echo ""
@@ -1099,7 +1095,7 @@ status() {
         | sed -n '/\[stdout\]/,/\[stderr\]/{//!p}' | sed 's/^/    /'
     fi
   else
-    echo "  vm-wiki no existe (correr: ./lab-azure.sh deploy-wiki-vm)"
+    echo "  vm-wiki doesn't exist (run: ./lab-azure.sh deploy-wiki-vm)"
   fi
 
   if az vm show --resource-group "$RG" --name vm-ctfd --output none 2>/dev/null; then
@@ -1117,11 +1113,11 @@ status() {
         | sed -n '/\[stdout\]/,/\[stderr\]/{//!p}' | sed 's/^/    /'
     fi
   else
-    echo "  vm-ctfd no existe (correr: ./lab-azure.sh deploy-ctfd-vm)"
+    echo "  vm-ctfd doesn't exist (run: ./lab-azure.sh deploy-ctfd-vm)"
   fi
 
   echo ""
-  echo "== Gateway WireGuard (snet-wg-gateway) =="
+  echo "== WireGuard Gateway (snet-wg-gateway) =="
   if az vm show --resource-group "$RG" --name vm-wg-gateway --output none 2>/dev/null; then
     local wg_power wg_pub_ip
     wg_power="$(az vm get-instance-view --resource-group "$RG" --name vm-wg-gateway \
@@ -1130,25 +1126,25 @@ status() {
       --query "[0].virtualMachine.network.publicIpAddresses[0].ipAddress" --output tsv)"
     printf "  %-22s %-18s %s\n" "vm-wg-gateway" "$wg_power" "$wg_pub_ip"
     if [[ "$wg_power" == "VM running" ]]; then
-      echo "  wg show wg0 (peers / tunnel IPs / ultimo handshake) + estado DNS interno:"
-      # Una sola invocacion de run-command para las dos cosas (ver docs/plans/internal-dns.md
-      # "Mecanismo de escritura de la zona": run-command es de un solo hilo por VM, no vale la
-      # pena gastar dos round-trips en un status que se corre a menudo).
+      echo "  wg show wg0 (peers / tunnel IPs / last handshake) + internal DNS state:"
+      # Single run-command invocation for both (see docs/plans/internal-dns.md
+      # "Zone write mechanism": run-command is single-threaded per VM, not worth
+      # spending two round-trips on a status that runs often).
       az vm run-command invoke --resource-group "$RG" --name vm-wg-gateway --command-id RunShellScript \
         --scripts "wg show wg0; echo '--- dns ---'; systemctl is-active dnsmasq; wc -l /etc/dnsmasq.hosts.d/* 2>/dev/null" \
         --query "value[0].message" --output tsv 2>/dev/null \
         | sed -n '/\[stdout\]/,/\[stderr\]/{//!p}' | sed 's/^/    /'
     fi
   else
-    echo "  vm-wg-gateway no existe (correr: ./lab-azure.sh deploy-wg-gateway)"
+    echo "  vm-wg-gateway doesn't exist (run: ./lab-azure.sh deploy-wg-gateway)"
   fi
 
   echo ""
-  echo "== Equipos (snet-teamN) =="
+  echo "== Teams (snet-teamN) =="
   print_container_states "team"
 
   echo ""
-  echo "== Monitoreo (snet-mgmt) =="
+  echo "== Monitoring (snet-mgmt) =="
   if az vm show --resource-group "$RG" --name vm-monitor --output none 2>/dev/null; then
     local mon_power mon_ip
     mon_power="$(az vm get-instance-view --resource-group "$RG" --name vm-monitor \
@@ -1162,37 +1158,37 @@ status() {
         --scripts "docker compose -f /opt/monitor/docker-compose.yml ps --format 'table {{.Name}}\t{{.Status}}'" \
         --query "value[0].message" --output tsv 2>/dev/null \
         | sed -n '/\[stdout\]/,/\[stderr\]/{//!p}' | sed 's/^/    /'
-      echo "  Grafana: http://${mon_ip}:3000 (tunel admin de WireGuard)"
+      echo "  Grafana: http://${mon_ip}:3000 (WireGuard admin tunnel)"
     fi
   else
-    echo "  vm-monitor no existe (correr: ./lab-azure.sh deploy-monitor-vm)"
+    echo "  vm-monitor doesn't exist (run: ./lab-azure.sh deploy-monitor-vm)"
   fi
 }
 
 test_deploy() {
   local team="${1:-1}"
-  echo "== TEST: infraestructura base + DMZ completa + team${team} =="
+  echo "== TEST: base infrastructure + complete DMZ + team${team} =="
   up
   deploy_dmz
   deploy_team "$team"
   echo ""
-  echo "== TEST LISTO: DMZ completa + team${team} desplegados =="
+  echo "== TEST DONE: complete DMZ + team${team} deployed =="
   status
 }
 
 down() {
-  echo "== Destruyendo TODO: se borra el Resource Group completo =="
-  read -p "Esto elimina '$RG' y TODO lo que contiene. ¿Confirmas? (escribe 'si'): " CONFIRM
-  if [[ "$CONFIRM" != "si" ]]; then
-    echo "Cancelado."
+  echo "== Destroying EVERYTHING: deleting entire Resource Group =="
+  read -p "This deletes '$RG' and EVERYTHING in it. Confirm? (type 'yes'): " CONFIRM
+  if [[ "$CONFIRM" != "yes" ]]; then
+    echo "Cancelled."
     exit 0
   fi
   az group delete --name "$RG" --yes --no-wait
   if az group exists --name NetworkWatcherRG --output tsv | grep -qi true; then
     az group delete --name NetworkWatcherRG --yes --no-wait
   fi
-  echo "Borrado en curso (--no-wait). Verifica con: az group exists --name $RG"
-  echo "(y az group exists --name NetworkWatcherRG)"
+  echo "Deletion in progress (--no-wait). Verify with: az group exists --name $RG"
+  echo "(and az group exists --name NetworkWatcherRG)"
 }
 
 # ---------------------------------------------------------------------------
@@ -1208,20 +1204,20 @@ case "${1:-}" in
   deploy-monitor-vm) create_monitor_vm ;;
   deploy-wg-gateway) deploy_wg_gateway ;;
   wg-team-peer)
-    # Backfill: genera el peer/tunel WireGuard de un equipo que ya fue desplegado con add-team
-    # ANTES de que existiera el gateway (create_wg_team_peer se saltó con un warning en ese
-    # momento). No recrea el equipo, solo la parte VPN -- idempotente igual que add-team.
+    # Backfill: generates WireGuard peer/tunnel for a team already deployed with add-team
+    # BEFORE the gateway existed (create_wg_team_peer skipped with warning at that
+    # time). Doesn't recreate team, only VPN part -- idempotent just like add-team.
     shift
     team="${1:-}"
     case "$team" in
-      ''|*[!0-9]*) echo "[ERROR] uso: $0 wg-team-peer <numero_de_equipo> (ej. 1, 2, 20)."; exit 1 ;;
+      ''|*[!0-9]*) echo "[ERROR] usage: $0 wg-team-peer <team_number> (e.g., 1, 2, 20)."; exit 1 ;;
     esac
     create_wg_team_peer "$team"
     ;;
   dns-sync)
-    # Sin --from-azure: push O(1) del estado local (yamls/generated/dns/*.hosts) -- rapido, para
-    # correr despues de una operacion manual. Con --from-azure: reconstruye todo desde Azure
-    # primero (comando de reparacion / chequeo pre-evento). Ver docs/plans/internal-dns.md.
+    # Without --from-azure: O(1) push of local state (yamls/generated/dns/*.hosts) -- fast, to
+    # run after manual operation. With --from-azure: rebuilds everything from Azure
+    # first (repair command / pre-event check). See docs/plans/internal-dns.md.
     shift
     if [[ "${1:-}" == "--from-azure" ]]; then
       rebuild_lab_dns_from_azure
@@ -1237,7 +1233,7 @@ case "${1:-}" in
   status)            status ;;
   down)              down ;;
   *)
-    echo "Uso: $0 {up|deploy-dmz|add-team <N>|add-team-range <inicio> <fin> [paralelismo]|deploy-wiki-vm|deploy-ctfd-vm|deploy-monitor-vm|deploy-wg-gateway|wg-team-peer <N>|dns-sync [--from-azure]|dns-check <fqdn>|test [N]|status|down}"
+    echo "Usage: $0 {up|deploy-dmz|add-team <N>|add-team-range <start> <end> [concurrency]|deploy-wiki-vm|deploy-ctfd-vm|deploy-monitor-vm|deploy-wg-gateway|wg-team-peer <N>|dns-sync [--from-azure]|dns-check <fqdn>|test [N]|status|down}"
     exit 1
     ;;
 esac

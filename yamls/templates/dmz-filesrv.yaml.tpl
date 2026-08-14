@@ -1,11 +1,11 @@
-# ACI container group: filesrv (compartido, snet-dmz-shared 10.50.0.0/24)
-# Imagen propia (maosuarez/sabanacorp-filesrv): filebrowser con el contenido de
-# sabana-corp-dmz/file-srv/{data,config} horneado dentro va Dockerfile -- ya no depende de un
-# bind mount, resuelve el gap de persistencia que tenia la imagen generica filebrowser/filebrowser.
+# ACI container group: filesrv (shared, snet-dmz-shared 10.50.0.0/24)
+# Custom image (maosuarez/sabanacorp-filesrv): filebrowser with content from
+# sabana-corp-dmz/file-srv/{data,config} baked in via Dockerfile -- no longer depends on a
+# bind mount, resolves the persistence gap that the generic filebrowser/filebrowser image had.
 #
-# Puerto 8080, no 80: filebrowser corre como usuario no-root y bindear <1024 requiere
-# CAP_NET_BIND_SERVICE via file capability en el binario -- ACI (aislamiento Hyper-V) la descarta,
-# a diferencia de Docker plano donde sí funciona. Ver config/settings.json en sabana-corp-dmz.
+# Port 8080, not 80: filebrowser runs as non-root user and binding <1024 requires
+# CAP_NET_BIND_SERVICE via file capability on the binary -- ACI (Hyper-V isolation) discards it,
+# unlike plain Docker where it works. See config/settings.json in sabana-corp-dmz.
 apiVersion: 2021-07-01
 location: eastus2
 name: dmz-filesrv
@@ -19,9 +19,9 @@ properties:
         resources: {requests: {cpu: 0.25, memoryInGB: 0.5}}
         ports: [{port: 8080}]
 
-  # DNSCONFIG-BEGIN -- lo elimina el generador si LAB_DNS_SERVER esta vacio (lab sin gateway).
-  # 2o nameserver a proposito: si dnsmasq no responde, el contenedor sigue resolviendo internet
-  # via Azure DNS (ver docs/plans/internal-dns.md).
+  # DNSCONFIG-BEGIN -- removed by generator if LAB_DNS_SERVER is empty (lab without gateway).
+  # 2nd nameserver on purpose: if dnsmasq doesn't respond, container keeps resolving internet
+  # via Azure DNS (see docs/plans/internal-dns.md).
   dnsConfig:
     nameServers:
       - "${LAB_DNS_SERVER}"

@@ -1,124 +1,124 @@
 # nmap-sabana-corp
 
-> **`0.1.0-draft`: build funcional (36/36 pruebas unitarias), pero aún NO validado contra el lab
-> real** -- faltan los tres supuestos de Fase 0 del plan (PTR desde un túnel real, comportamiento
-> de puerto cerrado en un contenedor ACI vivo, presión de conntrack en el gateway con N equipos
-> escaneando). No usar todavía como la herramienta oficial del evento; la versión `1.0.0` reemplaza
-> a esta cuando esos supuestos queden verificados. Detalle: `docs/plans/nmap-sabana-corp.md`.
+> **`0.1.0-draft`: functional build (36/36 unit tests), but NOT yet validated against the real lab**
+> -- missing the three Phase 0 assumptions from the plan (PTR from a real tunnel, closed port
+> behavior in a live ACI container, conntrack pressure on the gateway with N teams scanning).
+> Do not use yet as the official event tool; version `1.0.0` will replace this once those
+> assumptions are verified. Details: `docs/plans/nmap-sabana-corp.md`.
 
-Descubrimiento de red sin privilegios para el CTF de Sabana Corp. Un comando que responde "qué
-hay vivo en lo que yo alcanzo, y en qué puertos" -- calculado en tiempo real contra la red real,
-nunca contra una lista fija.
+Network discovery without privileges for the Sabana Corp CTF. A single command that answers "what
+is alive in my accessible range, and on which ports" -- computed in real time against the actual
+network, never against a fixed list.
 
-**No es nmap.** No usa su código, no reimplementa su motor. Solo hace una cosa que nmap también
-hace (connect scan por TCP) con el nombre elegido para que quede claro qué es, a un participante
-que probablemente no tiene nmap instalado.
+**It is not nmap.** It does not use its code, does not reimplement its engine. It does only one
+thing that nmap also does (TCP connect scan) with the name chosen to make clear what it is to a
+participant who probably does not have nmap installed.
 
-## Instalación
+## Installation
 
 ```bash
 npm install -g nmap-sabana-corp
-nmap-sabana-corp --version   # verificacion de pre-flight, hazlo ANTES del evento
+nmap-sabana-corp --version   # pre-flight check, do this BEFORE the event
 ```
 
-El lab no tiene salida a internet (portal cautivo + VPN). Si no llegaste a instalarlo antes,
-buscá `nmap-sabana-corp.mjs` en la misma carpeta que tu `<equipo>.conf` -- viaja junto al túnel,
-sin necesidad de red ni de `npm`:
+The lab has no internet access (captive portal + VPN). If you couldn't install it beforehand,
+look for `nmap-sabana-corp.mjs` in the same folder as your `<team>.conf` -- it travels along
+with the tunnel, without needing network or `npm`:
 
 ```bash
 node nmap-sabana-corp.mjs --scan
 ```
 
-## Uso
+## Usage
 
-Con el túnel WireGuard de tu equipo levantado:
+With your team's WireGuard tunnel up:
 
 ```bash
 nmap-sabana-corp
-nmap-sabana-corp --scan       # exactamente lo mismo; --scan es explicito, no hace nada distinto
-nmap-sabana-corp --json       # mismos campos, en JSON
+nmap-sabana-corp --scan       # exactly the same; --scan is explicit, does nothing different
+nmap-sabana-corp --json       # same fields, in JSON
 ```
 
-No hace falta indicar nada más: el alcance se deriva automáticamente de la interfaz de tu túnel
-(busca una dirección dentro de `10.200.0.0/16`). Otras opciones:
+You don't need to specify anything else: scope is derived automatically from your tunnel
+interface (looks for an address within `10.200.0.0/16`). Other options:
 
-| Flag | Para qué |
+| Flag | What for |
 |---|---|
-| `--cidr <a,b,c>` | Alcance explícito. Escape hatch para staff o para conflictos de ruta. |
-| `--conf <ruta>` | Deriva el alcance leyendo `AllowedIPs` de un `.conf` de WireGuard directamente -- es la fuente más autoritativa que hay. |
-| `--ports <a,b,c>` | Suma puertos extra al catálogo del lab. |
-| `--concurrency <n>` | Sockets simultáneos (por defecto 128). Bajalo si tu red es inestable. |
-| `--json` | Salida en JSON en vez de tabla de texto. |
-| `--version` / `--help` | Lo de siempre. |
+| `--cidr <a,b,c>` | Explicit scope. Escape hatch for staff or for routing conflicts. |
+| `--conf <path>` | Derives scope by reading `AllowedIPs` directly from a WireGuard `.conf` -- the most authoritative source there is. |
+| `--ports <a,b,c>` | Add extra ports to the lab catalog. |
+| `--concurrency <n>` | Simultaneous sockets (default 128). Lower this if your network is unstable. |
+| `--json` | Output in JSON instead of text table. |
+| `--version` / `--help` | The usual. |
 
-## Cómo funciona (resumen)
+## How it works (summary)
 
-1. **Alcance**: de tu túnel WireGuard (o de `--conf`/`--cidr` si los pasás). Nunca se adivina.
-2. **Hechos**: cada host y cada puerto se mide con una conexión TCP real (`net.Socket().connect()`,
-   sin privilegios, sin sockets raw). Un host se considera vivo si al menos un puerto del catálogo
-   responde -- aceptado o rechazado explícitamente. Cero resultados simulados, cero caché.
-3. **Nombres**: después de saber qué está vivo, se le pregunta al resolutor DNS del lab
-   (`10.200.0.1`, nunca al de tu sistema operativo) el nombre PTR de cada IP viva. Si el resolutor
-   no responde en 1 segundo, la herramienta sigue funcionando igual y muestra solo IPs.
+1. **Scope**: from your WireGuard tunnel (or from `--conf`/`--cidr` if you pass them). Never guessed.
+2. **Facts**: every host and every port is measured with a real TCP connection (`net.Socket().connect()`,
+   no privileges, no raw sockets). A host is considered alive if at least one port from the catalog
+   responds -- accepted or explicitly rejected. Zero simulated results, zero cache.
+3. **Names**: after learning what is alive, the lab's DNS resolver
+   (`10.200.0.1`, never your system's) is asked for the PTR name of each live IP. If the resolver
+   doesn't respond in 1 second, the tool keeps working and shows only IPs.
 
-Detalle completo de las tres decisiones (por qué en ese orden, por qué TCP y no DNS, por qué PTR y
-no forward) en `docs/plans/nmap-sabana-corp.md` del repo `sabana-corp-cloud`.
+Full details of the three decisions (why in that order, why TCP and not DNS, why PTR and
+not forward) in `docs/plans/nmap-sabana-corp.md` in the `sabana-corp-cloud` repo.
 
-## Qué significa cada columna
+## What each column means
 
 ```
-IP           FQDN                                        PUERTOS ABIERTOS
+IP           FQDN                                        OPEN PORTS
 10.60.3.4    database.team3.sabanacorp.internal          3306/tcp mysql
 10.60.3.7    -                                            80/tcp http
 ```
 
-- **IP**: dirección real, medida en esta corrida.
-- **FQDN**: nombre canónico que devolvió el resolutor del lab, o `-` si no tiene registro DNS.
-  **Un `-` no es un fallo de la herramienta ni del reto** -- hay hosts en este lab que nunca
-  tuvieron registro DNS (se desplegaron antes de que existiera esa capa) y van a seguir así. Que
-  falte el nombre no significa que el host esté mal, ni que no puedas alcanzarlo: la columna
-  siguiente (puertos) ya te lo confirma.
-- **PUERTOS ABIERTOS**: puerto, protocolo y una etiqueta de servicio genérica (tabla IANA,
-  derivada exclusivamente del número de puerto -- `80` es `http` sea cual sea el contenedor detrás).
+- **IP**: real address, measured in this run.
+- **FQDN**: canonical name returned by the lab's resolver, or `-` if it has no DNS record.
+  **A `-` is not a tool failure nor a challenge failure** -- there are hosts in this lab that
+  never had DNS records (they were deployed before that layer existed) and will keep it that way.
+  A missing name doesn't mean the host is broken, or that you can't reach it: the next column
+  (ports) already confirms it.
+- **OPEN PORTS**: port, protocol, and a generic service label (IANA table,
+  derived exclusively from port number -- `80` is `http` regardless of the container behind it).
 
-## Lo que esta herramienta nunca muestra, a propósito
+## What this tool never shows, on purpose
 
-| No se muestra | Por qué |
+| Never shown | Why |
 |---|---|
-| Banners, títulos HTTP, cabeceras, certificados TLS | Pueden filtrar una versión con CVE conocido, o texto del propio reto |
-| Versión o producto del servicio (`-sV`) | Ídem, y exigiría fingerprinting real |
-| Detección de sistema operativo | Requiere privilegios y no aporta nada al juego |
-| Puertos cerrados/filtrados uno por uno | Ruido; convertiría el output en un mapa del catálogo interno |
-| Cualquier anotación de rol, reto, dificultad o vulnerabilidad | Es la línea roja de esta herramienta |
-| Subredes de otros equipos | Fuera de tu alcance real; solo producirían timeouts |
-| `snet-mgmt` (infraestructura de staff) | No se publica ni se alcanza, por diseño |
-| Rutas, endpoints, directorios | Esto no es un escáner web |
+| Banners, HTTP titles, headers, TLS certificates | Can leak a version with a known CVE, or challenge text |
+| Service version or product (`-sV`) | Same, and would require real fingerprinting |
+| OS detection | Requires privileges and adds nothing to the game |
+| Closed/filtered ports one by one | Noise; would turn output into a map of the internal catalog |
+| Any annotation of role, challenge, difficulty, or vulnerability | It is the red line of this tool |
+| Other teams' subnets | Outside your real reach; would only produce timeouts |
+| `snet-mgmt` (staff infrastructure) | Not published or reachable, by design |
+| Routes, endpoints, directories | This is not a web scanner |
 
-Si esta herramienta alguna vez te dice algo que el número de puerto por sí solo no te diría, es un
-bug -- avisale al staff.
+If this tool ever tells you something that the port number alone wouldn't tell you, it's a
+bug -- report it to staff.
 
-## "No veo nada" / 0 hosts vivos
+## "I see nothing" / 0 hosts alive
 
-Antes de pensar que el lab está caído:
+Before thinking the lab is down:
 
-1. Verificá que tu túnel WireGuard esté realmente arriba (`wg show`, o el estado en la app oficial).
-2. Corré `nmap-sabana-corp --conf <tu-equipo>.conf` -- si con `--conf` tampoco aparece nada, ahí sí
-   avisale al staff.
+1. Verify that your WireGuard tunnel is really up (`wg show`, or the status in the official app).
+2. Run `nmap-sabana-corp --conf <your-team>.conf` -- if with `--conf` you still see nothing, then
+   tell staff.
 
-Que un host no tenga ningún puerto del catálogo abierto es indistinguible de una IP vacía -- y
-para el propósito de reconocimiento eso está bien: si no expone nada alcanzable, no es un host
-"disponible" para el reto.
+A host with no catalog ports open is indistinguishable from an empty IP -- and
+for reconnaissance purposes that's fine: if it exposes nothing reachable, it's not an
+"available" host for the challenge.
 
-## Resolver ≠ alcanzar
+## Resolving ≠ reaching
 
-Vas a poder ver nombres de otros equipos si preguntás por ellos a mano (la zona DNS del lab es
-plana, no hay `split-horizon`): reconocimiento de red es parte del juego. Que un nombre resuelva
-**no** significa que lo puedas alcanzar -- el control de acceso real está en el gateway VPN, no en
-el DNS. Vas a ver `webapp.team7.sabanacorp.internal`, pero conectarte a la red de otro equipo es
-exactamente lo que este CTF te reta a lograr, no algo que esta herramienta te dé gratis.
+You will be able to see names from other teams if you ask for them manually (the lab's DNS zone
+is flat, no `split-horizon`): network reconnaissance is part of the game. A name resolving
+**does not** mean you can reach it -- the real access control is on the VPN gateway, not in
+DNS. You will see `webapp.team7.sabanacorp.internal`, but connecting to another team's network
+is exactly what this CTF challenges you to achieve, not something this tool gives you for free.
 
-## Cero dependencias, a propósito
+## Zero dependencies, on purpose
 
-Este paquete no depende de nada fuera de la librería estándar de Node (`net`, `dns`, `os`). Eso
-significa instalación instantánea y, más importante, que podés leer el código fuente completo
-(`src/`) en un rato si querés confirmar exactamente qué hace antes de correrlo en tu laptop.
+This package depends on nothing outside Node's standard library (`net`, `dns`, `os`). That
+means instant installation and, more importantly, you can read the complete source code
+(`src/`) in a while if you want to confirm exactly what it does before running it on your laptop.

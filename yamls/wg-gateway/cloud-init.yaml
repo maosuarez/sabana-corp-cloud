@@ -1,13 +1,13 @@
 #cloud-config
-# Validado end-to-end 2026-08-08 -- ver docs/plans/wireguard-vpn-gateway.md. Instala WireGuard al
-# primer arranque de vm-wg-gateway. No crea ningun [Peer] aqui -- los peers (admin, team<N>) se
-# agregan despues, incrementalmente, via yamls/wg-gateway/remote/add-peer.sh.tpl corrido por
-# lab-azure.sh a traves de 'az vm run-command invoke'. El nombre de interfaz 'eth0' que asume el
-# MASQUERADE de mas abajo quedo confirmado contra la imagen Ubuntu real de esta VM en esa misma
-# validacion (el trafico de los clientes VPN sale correctamente).
+# Validated end-to-end 2026-08-08 -- see docs/plans/wireguard-vpn-gateway.md. Installs WireGuard on
+# first boot of vm-wg-gateway. Does not create any [Peer] here -- peers (admin, team<N>) are
+# added later, incrementally, via yamls/wg-gateway/remote/add-peer.sh.tpl run by
+# lab-azure.sh through 'az vm run-command invoke'. The interface name 'eth0' assumed by the
+# MASQUERADE below was confirmed against the real Ubuntu image for this VM in that same
+# validation (VPN client traffic exits correctly).
 #
-# dnsmasq (ver docs/plans/internal-dns.md): DNS interno del lab, mismo host que la VPN porque es
-# la unica maquina que ya esta en el camino de todos (clientes VPN + contenedores ACI de la VNet).
+# dnsmasq (see docs/plans/internal-dns.md): lab's internal DNS, same host as VPN because it's
+# the only machine already in the path of all (VPN clients + ACI containers in the VNet).
 package_update: true
 packages:
   - wireguard
@@ -28,53 +28,53 @@ write_files:
       [Interface]
       Address = 10.200.0.1/16
       ListenPort = 51820
-      # La regla RELATED,ESTABLISHED es obligatoria: las reglas por-peer que agrega
-      # add-peer.sh.tpl solo permiten "source=<tunnel_ip> -> dest=<cidrs>" (la ida). La
-      # respuesta llega ya des-enmascarada por conntrack (source=<destino real>, dest=<tunnel_ip>)
-      # y no matchea esa regla -- sin esto, cada conexion se cae despues del primer paquete
-      # (confirmado en la primera corrida real, 2026-08-08: contador de DROP subia mientras el
-      # de ACCEPT del peer admin quedaba estancado).
+      # RELATED,ESTABLISHED rule is mandatory: per-peer rules added by
+      # add-peer.sh.tpl only allow "source=<tunnel_ip> -> dest=<cidrs>" (outbound). Response
+      # arrives already de-masqueraded by conntrack (source=<real_dest>, dest=<tunnel_ip>)
+      # and doesn't match that rule -- without this, every connection drops after the first packet
+      # (confirmed in first real run, 2026-08-08: DROP counter increased while the peer admin's
+      # ACCEPT counter stalled).
       PostUp   = iptables -t nat -A POSTROUTING -o eth0 -j MASQUERADE; iptables -A FORWARD -m state --state RELATED,ESTABLISHED -j ACCEPT; iptables -P FORWARD DROP
       PostDown = iptables -t nat -D POSTROUTING -o eth0 -j MASQUERADE
 
-  # DNS interno del lab -- ver docs/plans/internal-dns.md "Cambios archivo por archivo".
+  # Lab's internal DNS -- see docs/plans/internal-dns.md "Changes file by file".
   - path: /etc/dnsmasq.d/00-lab.conf
     content: |
-      # Escucha solo en las interfaces del lab. bind-dynamic (no bind-interfaces): tolera que wg0
-      # aparezca/desaparezca y evita chocar con el stub de systemd-resolved en 127.0.0.53:53.
+      # Listens only on lab interfaces. bind-dynamic (not bind-interfaces): tolerates wg0
+      # appearing/disappearing and avoids clashing with systemd-resolved stub at 127.0.0.53:53.
       bind-dynamic
       interface=wg0
       interface=eth0
 
-      # Upstream explicito. no-resolv es OBLIGATORIO: sin el, dnsmasq leeria /etc/resolv.conf, que
-      # en Ubuntu 22.04 apunta a 127.0.0.53 (systemd-resolved) -> bucle de resolucion consigo mismo.
+      # Explicit upstream. no-resolv is MANDATORY: without it, dnsmasq would read /etc/resolv.conf, which
+      # on Ubuntu 22.04 points to 127.0.0.53 (systemd-resolved) -> resolution loop with itself.
       no-resolv
       server=168.63.129.16
 
-      # La zona del lab nunca se reenvia hacia arriba: Azure DNS no la conoce, y sin esto cada
-      # nombre inexistente del lab se va a internet y tarda.
+      # Lab zone is never forwarded upstream: Azure DNS doesn't know it, and without this every
+      # non-existent lab name goes to internet and takes time.
       local=/sabanacorp.internal/
       domain=sabanacorp.internal
       expand-hosts
       domain-needed
       bogus-priv
 
-      # Registros del lab: formato /etc/hosts, un archivo por bloque, recargados por inotify (sin
-      # SIGHUP y sin reiniciar el servicio -- SIGHUP no relee /etc/dnsmasq.d/*.conf, hostsdir si).
+      # Lab records: /etc/hosts format, one file per block, reloaded by inotify (no
+      # SIGHUP or service restart needed -- SIGHUP doesn't reread /etc/dnsmasq.d/*.conf, hostsdir does).
       hostsdir=/etc/dnsmasq.hosts.d
 
-      # TTL corto: si un contenedor se recrea con otra IP, la correccion propaga en segundos.
+      # Short TTL: if a container is recreated with a different IP, correction propagates in seconds.
       local-ttl=10
       cache-size=1000
       log-facility=/var/log/dnsmasq.log
-      #log-queries   # activar solo para depurar; en el evento genera mucho ruido
+      #log-queries   # enable only for debugging; during event generates a lot of noise
 
-  # El directorio tiene que existir antes de que dnsmasq arranque -- si hostsdir apunta a algo
-  # inexistente, dnsmasq falla al iniciar.
+  # Directory must exist before dnsmasq starts -- if hostsdir points to something
+  # non-existent, dnsmasq fails to start.
   - path: /etc/dnsmasq.hosts.d/.keep
     content: ""
 
-  # El dnsmasq.service de Ubuntu no trae Restart=always por defecto.
+  # Ubuntu's dnsmasq.service doesn't have Restart=always by default.
   - path: /etc/systemd/system/dnsmasq.service.d/10-restart.conf
     content: |
       [Service]
@@ -82,18 +82,18 @@ write_files:
       RestartSec=2
 
 runcmd:
-  # El keypair del servidor se genera aqui, no solo en init-server-keys.sh: wg-quick exige
-  # PrivateKey definido en [Interface] para poder levantar la interfaz, asi que sin esto
-  # 'systemctl enable --now wg-quick@wg0' fallaria en el primer boot (wg0.conf sin PrivateKey
-  # todavia). init-server-keys.sh sigue existiendo para el caso idempotente de volver a pedir el
-  # PUBKEY despues, no para la generacion inicial.
+  # Server keypair is generated here, not just in init-server-keys.sh: wg-quick requires
+  # PrivateKey defined in [Interface] to bring up the interface, so without this
+  # 'systemctl enable --now wg-quick@wg0' would fail on first boot (wg0.conf without PrivateKey
+  # yet). init-server-keys.sh still exists for the idempotent case of requesting the
+  # PUBKEY again later, not for initial generation.
   - umask 077 && wg genkey | tee /etc/wireguard/server_private.key | wg pubkey > /etc/wireguard/server_public.key
   - sed -i "/^\[Interface\]/a PrivateKey = $(cat /etc/wireguard/server_private.key)" /etc/wireguard/wg0.conf
   - sysctl --system
   - systemctl enable --now wg-quick@wg0
-  # Reglas INPUT para 53: documentan la intencion, son no-ops mientras la politica de INPUT siga
-  # en ACCEPT (ver docs/plans/internal-dns.md "Resiliencia" -- nota de seguridad). Van antes del
-  # netfilter-persistent save que ya existia.
+  # INPUT rules for 53: document intent, are no-ops while INPUT policy stays
+  # at ACCEPT (see docs/plans/internal-dns.md "Resilience" -- security note). Go before the
+  # netfilter-persistent save that already exists.
   - iptables -A INPUT -i wg0 -p udp --dport 53 -j ACCEPT
   - iptables -A INPUT -i wg0 -p tcp --dport 53 -j ACCEPT
   - iptables -A INPUT -i eth0 -s 10.0.0.0/8 -p udp --dport 53 -j ACCEPT

@@ -1,54 +1,29 @@
-# Plan: reglas NSG de segmentación entre subredes
+# Plan: NSG segmentation rules between subnets
 
-## Estado
+## Status
 
-No implementado. Solo diseño/documentación por ahora — el pedido explícito fue
-"documentemos eso", no aplicarlo todavía. Ver `CLAUDE.md` ("Arquitectura de red
-objetivo") para el estado actual (libre albedrío total, sin un solo NSG creado sobre
-las subredes del lab; el único NSG que existe hoy, `nsg-jumpbox`, es ad hoc para SSH de
-un jumpbox de prueba y no expresa ninguna política de segmentación real).
+Not implemented. Design/documentation only for now — the explicit request was "let's document that", not apply it yet. See `CLAUDE.md` ("Target network architecture") for current state (complete freedom, not a single NSG created on the lab's subnets; the only NSG today, `nsg-jumpbox`, is ad hoc for SSH from a test jumpbox and doesn't express any real segmentation policy).
 
-## Problema
+## Problem
 
-Azure enruta por defecto entre todas las subredes de una misma VNet, sin restricción.
-Hoy (`vnet-ctf-lab`, `10.0.0.0/8`) eso significa:
+Azure routes by default between all subnets of the same VNet without restriction. Today (`vnet-ctf-lab`, `10.0.0.0/8`) that means:
 
-- `snet-team1` puede alcanzar `snet-team2`, `snet-team3`, etc. — rompe el aislamiento
-  entre equipos que el CTF necesita (un equipo podría atacar directamente la
-  infraestructura de otro en vez de la suya).
-- Cualquier subred puede alcanzar `snet-mgmt` — si algún día ahí vive CTFd,
-  Provisioner, Monitor o el jumpbox de administración, un participante podría
-  alcanzarlos directamente sin pasar por ningún control.
-- Un contenedor de `snet-dmz-shared` o `snet-dmz-vm` comprometido (son objetivos del
-  CTF — filesrv, wiki, parking, decoys, todos pensados para ser vulnerados) podría, en
-  teoría, iniciar conexiones hacia `snet-teamX` o `snet-mgmt` y usarse como pivote más
-  allá de lo que el diseño del reto contempla.
+- `snet-team1` can reach `snet-team2`, `snet-team3`, etc. — breaks the team isolation that the CTF requires (one team could directly attack another's infrastructure instead of their own).
+- Any subnet can reach `snet-mgmt` — if CTFd, Provisioner, Monitor, or the admin jumpbox ever live there, a participant could reach them directly without any control.
+- A compromised container in `snet-dmz-shared` or `snet-dmz-vm` (they're CTF targets — filesrv, wiki, parking, decoys, all meant to be exploited) could theoretically initiate connections to `snet-teamX` or `snet-mgmt` and serve as a pivot beyond what the challenge design intended.
 
-Esto ya se había identificado como gap en la decisión de diseño del xss-bot compartido
-(`CLAUDE.md`, "xss-bot es N instancias") y en `yamls/README.md` ("Acceso desde la red
-interna") — este doc es donde se cierra ese pendiente con una propuesta concreta.
+This was already identified as a gap in the xss-bot shared design decision (`CLAUDE.md`, "xss-bot is N instances") and in `yamls/README.md` ("Access from the internal network") — this doc is where that pending item is closed with a concrete proposal.
 
-## Modelo de amenaza (resumen)
+## Threat model (summary)
 
-- Los **equipos son mutuamente no confiables entre sí** — cada uno debe poder atacar
-  solo su propia infraestructura y los servicios compartidos de DMZ, nunca la
-  infraestructura de otro equipo.
-- La **DMZ (compartida y DMZ-VM) es superficie de ataque intencional** — se espera que
-  los equipos la exploten. No debe, a su vez, poder iniciar conexiones hacia los
-  equipos (evita que comprometer un decoy/wiki se convierta en pivote hacia team1 en
-  vez de ser un callejón sin salida como está pensado).
-- **`snet-mgmt` es plano de staff** — CTFd, Provisioner, Monitor y cualquier tooling de
-  administración. Ningún equipo ni servicio de DMZ debe poder alcanzarlo. El tráfico
-  válido es en la dirección contraria (staff/monitoring iniciando hacia equipos y DMZ
-  para scraping, health checks, etc.).
-- **`snet-wg-gateway` es la puerta de entrada** — recibe tráfico de clientes VPN desde
-  internet y lo enruta hacia adentro. **Resuelto en `docs/plans/wireguard-vpn-gateway.md`**
-  (2026-08-08): el control de acceso ahí no se implementa como NSG (ver nota bajo la matriz).
+- **Teams are mutually untrusted** — each should only be able to attack their own infrastructure and shared DMZ services, never another team's infrastructure.
+- **The DMZ (shared and DMZ-VM) is intentional attack surface** — teams are expected to exploit it. It shouldn't, in turn, be able to initiate connections to teams (prevents compromising a decoy/wiki from becoming a pivot to team1 instead of a dead end as intended).
+- **`snet-mgmt` is the staff plane** — CTFd, Provisioner, Monitor, and any admin tooling. No team or DMZ service should reach it. Valid traffic goes the other direction (staff/monitoring initiating to teams and DMZ for scraping, health checks, etc.).
+- **`snet-wg-gateway` is the entry point** — receives VPN client traffic from the internet and routes inward. **Resolved in `docs/plans/wireguard-vpn-gateway.md`** (2026-08-08): access control there isn't implemented as an NSG (see note below the matrix).
 
-## Matriz de reglas propuesta
+## Proposed rule matrix
 
-Origen (filas) → Destino (columnas). `✓` permitido, `✗` denegado, `—` no aplica /
-fuera de alcance de este doc.
+Source (rows) → Destination (columns). `✓` allowed, `✗` denied, `—` not applicable / out of scope for this doc.
 
 | Origen \ Destino  | snet-teamX (mismo) | snet-teamX (otro) | snet-dmz-shared | snet-dmz-vm | snet-mgmt | snet-wg-gateway |
 |-------------------|:---:|:---:|:---:|:---:|:---:|:---:|
@@ -58,77 +33,30 @@ fuera de alcance de este doc.
 | **snet-mgmt**     | ✓   | ✓   | ✓   | ✓   | ✓   | —   |
 | **snet-wg-gateway** | — | —   | —   | —   | —   | —   |
 
-Notas sobre la matriz:
+Notes on the matrix:
 
-- **snet-teamX → snet-teamX (mismo)**: tráfico intra-equipo, siempre permitido (es
-  como los 4 contenedores de un mismo equipo se comunican entre sí hoy).
-- **snet-teamX → otro snet-teamY**: denegado — aislamiento entre equipos.
-- **snet-teamX → DMZ (shared/vm)**: permitido — es el objetivo real del reto (pivotar
-  desde el edificio propio hacia filesrv/wiki/parking/decoys).
-- **DMZ → snet-teamX**: denegado en ambas direcciones — comprometer un servicio DMZ no
-  debe dar acceso a la red de ningún equipo.
-- **DMZ-shared ↔ DMZ-vm**: permitido entre sí (ambas son "la DMZ", solo separadas por
-  la limitación técnica de ACI vs. VM — ver `docs/plans/wiki-on-vm.md`). Ej.: si algún
-  día un contenedor de `snet-dmz-shared` necesita hablar con el wiki en
-  `snet-dmz-vm`, no hay razón de negarlo.
-- **Nadie (equipos ni DMZ) → snet-mgmt**: denegado — plano de staff aislado.
-- **snet-mgmt → todo**: permitido — monitoreo/administración necesita visibilidad
-  amplia. Si esto resulta demasiado permisivo cuando se implemente Monitor/Provisioner
-  de verdad, revisar (podría acotarse a los puertos específicos de scraping en vez de
-  "todo").
-- **snet-wg-gateway**: fila/columna deliberadamente en blanco — el control de acceso de los
-  clientes VPN no se modela en esta matriz. Ver nota debajo.
+- **snet-teamX → snet-teamX (same)**: intra-team traffic, always allowed (how the 4 containers of the same team communicate today).
+- **snet-teamX → another snet-teamY**: denied — team isolation.
+- **snet-teamX → DMZ (shared/vm)**: allowed — it's the real challenge objective (pivot from your own building to filesrv/wiki/parking/decoys).
+- **DMZ → snet-teamX**: denied in both directions — compromising a DMZ service shouldn't grant access to any team's network.
+- **DMZ-shared ↔ DMZ-vm**: allowed to each other (both are "the DMZ", only separated by the technical limitation of ACI vs. VM — see `docs/plans/wiki-on-vm.md`). E.g.: if someday a `snet-dmz-shared` container needs to talk to the wiki in `snet-dmz-vm`, there's no reason to block it.
+- **Nobody (teams or DMZ) → snet-mgmt**: denied — isolated staff plane.
+- **snet-mgmt → everything**: allowed — monitoring/admin needs broad visibility. If this is too permissive when Monitor/Provisioner really deploy, revisit (could narrow to specific scraping ports instead of "everything").
+- **snet-wg-gateway**: row/column deliberately blank — VPN client access control isn't modeled in this matrix. See note below.
 
-## Notas de implementación (para cuando se decida aplicar esto)
+## Implementation notes (for when this is decided to be applied)
 
-- Un NSG por subred (Azure permite asociar un NSG a una subred directamente, sin
-  depender de NICs individuales) — más simple de razonar que un NSG compartido con
-  reglas por IP de origen.
-- Los NSG de subredes delegadas a ACI (`snet-dmz-shared`) sí son compatibles —
-  Azure permite asociar NSGs a subredes delegadas a `Microsoft.ContainerInstance`.
-  No debería haber sorpresas ahí, pero conviene probarlo contra un solo contenedor
-  antes de aplicarlo a los 14 que ya corren, para no romper `deploy_dmz` a mitad de un
-  evento.
-- Las reglas "denegar equipo→equipo" necesitan una entrada explícita de **deny** por
-  cada rango de equipo activo (o una regla que solo permita el propio bloque
-  `10.60.<N>.0/24` de cada subred de equipo y deniegue el resto de `10.60.0.0/16`) —
-  como `add-team <N>` crea subredes bajo demanda, el NSG de cada `snet-teamX` debería
-  generarse/actualizarse en el mismo paso que crea la subred (`lab-azure.sh:
-  add_team_subnet`), no a mano.
-- Recomendado: aplicar esto primero contra un solo equipo de prueba (team1, que ya
-  está desplegado) y confirmar con `az container exec` + `curl`/`nc` cruzado entre
-  subredes que las reglas se comportan como se espera, antes de generalizarlo a
-  `add-team` para futuros equipos.
-- Orden de rollout sugerido: (1) bloquear equipo↔equipo, (2) bloquear
-  DMZ→equipos, (3) bloquear todo→mgmt — de menor a mayor probabilidad de romper algo
-  que ya funciona, para poder aislar rápido cuál regla causó un problema si algo se
-  rompe.
+- One NSG per subnet (Azure allows attaching an NSG to a subnet directly, without depending on individual NICs) — simpler to reason about than a shared NSG with rules by source IP.
+- NSGs on ACI-delegated subnets (`snet-dmz-shared`) are compatible — Azure allows attaching NSGs to subnets delegated to `Microsoft.ContainerInstance`. Shouldn't be any surprises there, but good to test against a single container before applying it to the 14 already running, to avoid breaking `deploy_dmz` midway through an event.
+- "Deny team→team" rules need an explicit **deny** entry for each active team range (or a rule that only allows that team's own `10.60.<N>.0/24` block and denies the rest of `10.60.0.0/16`) — since `add-team <N>` creates subnets on-demand, each `snet-teamX`'s NSG should be generated/updated in the same step that creates the subnet (`lab-azure.sh: add_team_subnet`), not manually.
+- Recommended: apply this first against a single test team (team1, already deployed) and confirm with `az container exec` + cross-subnet `curl`/`nc` that rules behave as expected, before generalizing to `add-team` for future teams.
+- Suggested rollout order: (1) block team↔team, (2) block DMZ→teams, (3) block everything→mgmt — from lower to higher probability of breaking something already working, so you can quickly isolate which rule caused a problem if something breaks.
 
-## Nota: DNS interno (`docs/plans/internal-dns.md`, implementado)
+## Note: Internal DNS (`docs/plans/internal-dns.md`, implemented)
 
-Si algún día se aplican los NSGs de este plan, **`snet-team*` y `snet-dmz-*` tienen que poder
-alcanzar `snet-wg-gateway` en UDP/TCP 53** — es donde vive dnsmasq (`10.10.0.4`). La matriz de
-arriba deja esa columna en blanco ("fuera de alcance"), lo que hoy es correcto porque no hay NSGs
-creados, pero se volvería un corte silencioso del DNS de todos los contenedores en cuanto alguien
-materialice esta matriz. Mismo aviso para un futuro NSG de `snet-wg-gateway`: si algún día su
-política pasa de la actual (sin NSG de subred, solo el `nsg-wg-gateway` que ya existe) a algo tipo
-`DenyVnetInBound`, hay que añadir antes una regla `allow-dns-inbound` (53 desde `VirtualNetwork`) o
-el gateway deja de resolver nombres para toda la VNet sin que nadie lo note hasta que alguien
-pregunte por qué `curl http://webapp.team3...` dejó de andar.
+If this plan's NSGs are ever applied, **`snet-team*` and `snet-dmz-*` must be able to reach `snet-wg-gateway` on UDP/TCP 53** — that's where dnsmasq lives (`10.10.0.4`). The matrix above leaves that column blank ("out of scope"), which is correct today because no NSGs are created, but would become silent DNS cutoff for all containers once someone materializes this matrix. Same warning for a future `snet-wg-gateway` NSG: if its policy ever moves from today (no subnet NSG, just the `nsg-wg-gateway` that already exists) to something like `DenyVnetInBound`, an `allow-dns-inbound` rule (53 from `VirtualNetwork`) must be added first or the gateway stops resolving names for the whole VNet unnoticed until someone asks why `curl http://webapp.team3...` stopped working.
 
-## Abierto / no decidido
+## Open / not decided
 
-- ~~Política de `snet-wg-gateway`~~ — **resuelto, no vía NSG.** El control de acceso de
-  los clientes VPN se implementa en el propio gateway (`vm-wg-gateway`): reglas
-  `iptables FORWARD` por IP de túnel WireGuard, con política `DROP` por defecto — no en
-  una NSG de subred. Motivo: esta matriz es de grano por-subred, y el control que
-  necesita la VPN es por-peer (dos equipos comparten la "clase" `snet-team<N>` pero
-  deben tener acceso mutuamente exclusivo, algo que un NSG de subred no expresa sin
-  duplicar por completo el ciclo de vida de `add-team`). Ver
-  `docs/plans/wireguard-vpn-gateway.md` para el diseño completo. El resto de esta matriz
-  (equipo↔equipo, DMZ→equipos, todo→mgmt) sigue sin implementarse y sigue aplicando tal
-  cual al tráfico *dentro* de la VNet que no pasa por el gateway.
-- Si Monitor/Provisioner terminan viviendo en `snet-mgmt` con necesidad de exponer un
-  puerto hacia equipos (ej. Provisioner respondiendo a un webhook), la regla
-  "`snet-mgmt → todo` sí, nadie → `snet-mgmt`" tendría que ganar una excepción
-  puntual — no bloquear ese caso preventivamente sin saber si aplica.
+- ~~Policy for `snet-wg-gateway`~~ — **resolved, not via NSG.** VPN client access control is implemented on the gateway itself (`vm-wg-gateway`): `iptables FORWARD` rules by WireGuard tunnel IP, with `DROP` policy by default — not in a subnet NSG. Reason: this matrix is per-subnet grain, and VPN control needs to be per-peer (two teams share the `snet-team<N>` "class" but need mutually exclusive access, which a subnet NSG can't express without completely duplicating `add-team`'s lifecycle). See `docs/plans/wireguard-vpn-gateway.md` for the full design. The rest of this matrix (team↔team, DMZ→teams, everything→mgmt) remains unimplemented and still applies as-is to traffic *within* the VNet that doesn't go through the gateway.
+- If Monitor/Provisioner end up living in `snet-mgmt` needing to expose a port to teams (e.g., Provisioner answering a webhook), the rule "`snet-mgmt → everything` yes, nobody → `snet-mgmt`" would need a point exception — don't block that case preventively without knowing it applies.

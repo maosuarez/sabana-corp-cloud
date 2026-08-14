@@ -1,8 +1,8 @@
 #cloud-config
-# vm-ctfd (snet-dmz-vm) -- mismo cloud-init que yamls/wiki-vm/cloud-init.yaml (Docker Engine +
-# plugin compose via el script oficial de Docker), mas python3-pip: create_ctfd_vm() en
-# lab-azure.sh corre scripts/seed_challenges.py (de sabana-corp-CTFd) directo en esta VM despues
-# del deploy, contra http://localhost -- no depende de que el operador este en la VPN. Ver
+# vm-ctfd (snet-dmz-vm) -- same cloud-init as yamls/wiki-vm/cloud-init.yaml (Docker Engine +
+# compose plugin via Docker's official script), plus python3-pip: create_ctfd_vm() in
+# lab-azure.sh runs scripts/seed_challenges.py (from sabana-corp-CTFd) directly on this VM after
+# deploy, against http://localhost -- does not depend on the operator being on VPN. See
 # docs/plans/ctfd-deployment.md (F2).
 package_update: true
 packages:

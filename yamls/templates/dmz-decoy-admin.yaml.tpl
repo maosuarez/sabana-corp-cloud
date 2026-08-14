@@ -1,5 +1,5 @@
-# ACI container group: decoy-admin (compartido, snet-dmz-shared 10.50.0.0/24)
-# Perfil "admin": HTTP 8443 (panel de administracion falso, 401).
+# ACI container group: decoy-admin (shared, snet-dmz-shared 10.50.0.0/24)
+# Profile "admin": HTTP 8443 (fake admin panel, 401).
 apiVersion: 2021-07-01
 location: eastus2
 name: dmz-decoy-admin
@@ -17,9 +17,9 @@ properties:
         resources: {requests: {cpu: 0.25, memoryInGB: 0.5}}
         ports: [{port: 8443}]
 
-  # DNSCONFIG-BEGIN -- lo elimina el generador si LAB_DNS_SERVER esta vacio (lab sin gateway).
-  # 2o nameserver a proposito: si dnsmasq no responde, el contenedor sigue resolviendo internet
-  # via Azure DNS (ver docs/plans/internal-dns.md).
+  # DNSCONFIG-BEGIN -- removed by generator if LAB_DNS_SERVER is empty (lab without gateway).
+  # 2nd nameserver on purpose: if dnsmasq doesn't respond, container keeps resolving internet
+  # via Azure DNS (see docs/plans/internal-dns.md).
   dnsConfig:
     nameServers:
       - "${LAB_DNS_SERVER}"

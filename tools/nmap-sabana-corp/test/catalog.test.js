@@ -2,17 +2,17 @@ import assert from 'node:assert/strict'
 import { test } from 'node:test'
 import { CATALOG_PORTS, PHASE_A_PORTS, serviceForPort } from '../src/catalog.js'
 
-test('catalogo de puertos coincide con el documentado en el plan', () => {
+test('port catalog matches what is documented in the plan', () => {
   assert.deepEqual(CATALOG_PORTS, [
     21, 22, 25, 80, 110, 143, 443, 445, 554, 873, 3000, 3306, 5432, 8000, 8080, 8443, 9090, 9100, 9418
   ])
 })
 
-test('Fase A es un subconjunto del catalogo completo', () => {
+test('Phase A is a subset of the complete catalog', () => {
   for (const port of PHASE_A_PORTS) assert.ok(CATALOG_PORTS.includes(port))
 })
 
-test('serviceForPort: etiquetas conocidas del ejemplo del plan', () => {
+test('serviceForPort: known labels from the plan example', () => {
   assert.equal(serviceForPort(3306), 'mysql')
   assert.equal(serviceForPort(80), 'http')
   assert.equal(serviceForPort(22), 'ssh')
@@ -20,6 +20,6 @@ test('serviceForPort: etiquetas conocidas del ejemplo del plan', () => {
   assert.equal(serviceForPort(9100), 'jetdirect')
 })
 
-test('serviceForPort: puerto fuera de catalogo no revienta', () => {
+test('serviceForPort: port outside catalog does not crash', () => {
   assert.equal(serviceForPort(65000), 'unknown')
 })

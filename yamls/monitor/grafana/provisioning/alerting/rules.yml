@@ -1,15 +1,15 @@
-# rules.yml -- Grafana Unified Alerting, provisionado como codigo (sin contact points, ver
-# "Decision de diseño: alerta visual en Grafana, sin Alertmanager" en
-# docs/plans/observability-monitoring.md). El staff opera con el dashboard en pantalla; estas
-# reglas solo alimentan el estado visual de alerta y su historia (cuando empezo, cuanto lleva).
+# rules.yml -- Grafana Unified Alerting, provisioned as code (without contact points, see
+# "Design decision: visual alert in Grafana, no Alertmanager" in
+# docs/plans/observability-monitoring.md). Staff operates with the dashboard on screen; these
+# rules only feed the visual alert state and its history (when it started, how long it's been going).
 #
-# BotColgado no esta aqui: requiere el health endpoint de bot.js (/health, last_visit_ts,
-# browser_alive), que es un cambio en el repo sabana-corp-network, fuera de alcance de este repo
-# (ver "El punto ciego: xss-bot" en el plan).
-# GatewaySinHandshakes tampoco: requiere leer 'wg show wg0' via run-command contra
-# vm-wg-gateway, que exige un rol mas amplio que el Reader con el que se penso la managed identity
-# de vm-monitor (ver "Riesgos: la managed identity es el activo mas valioso de snet-mgmt" -- subir
-# el alcance de esa identidad solo para esta alerta no se justifica sin revisitar esa decision).
+# BotColgado is not here: it requires the health endpoint from bot.js (/health, last_visit_ts,
+# browser_alive), which is a change in the sabana-corp-network repo, out of scope for this repo
+# (see "The blind spot: xss-bot" in the plan).
+# GatewaySinHandshakes either: requires reading 'wg show wg0' via run-command against
+# vm-wg-gateway, which requires a broader role than the Reader that vm-monitor's managed identity was
+# designed with (see "Risks: the managed identity is the most valuable asset in snet-mgmt" -- raising
+# that identity's scope just for this alert is not justified without revisiting that decision).
 apiVersion: 1
 
 groups:
@@ -25,8 +25,8 @@ groups:
         labels:
           severity: critical
         annotations:
-          summary: "{{ $labels.service }} caido (team {{ $labels.team }})"
-          accion: "./lab-azure.sh restore team {{ $labels.team }} {{ $labels.service }}  (o restore dmz, si aplica)"
+          summary: "{{ $labels.service }} down (team {{ $labels.team }})"
+          action: "./lab-azure.sh restore team {{ $labels.team }} {{ $labels.service }}  (or restore dmz, if applicable)"
         data:
           - refId: A
             relativeTimeRange: { from: 300, to: 0 }
@@ -51,8 +51,8 @@ groups:
         labels:
           severity: critical
         annotations:
-          summary: "Los 4 servicios de team {{ $labels.team }} estan caidos"
-          accion: "revisar la subred/pool de IPs de snet-team{{ $labels.team }}, no los contenedores uno a uno"
+          summary: "All 4 services of team {{ $labels.team }} are down"
+          action: "check the subnet/IP pool of snet-team{{ $labels.team }}, not the containers one by one"
         data:
           - refId: A
             relativeTimeRange: { from: 300, to: 0 }
@@ -77,8 +77,8 @@ groups:
         labels:
           severity: critical
         annotations:
-          summary: "{{ $labels.name }}: restartCount subio 3+ veces en 10 min"
-          accion: "mirar logs (az container logs) ANTES de reiniciar"
+          summary: "{{ $labels.name }}: restartCount increased 3+ times in 10 min"
+          action: "check logs (az container logs) BEFORE restarting"
         data:
           - refId: A
             relativeTimeRange: { from: 600, to: 0 }
@@ -103,8 +103,8 @@ groups:
         labels:
           severity: critical
         annotations:
-          summary: "team {{ $labels.team }}/{{ $labels.service }} tiene horneada una IP vieja de {{ $labels.depends_on }}"
-          accion: "./lab-azure.sh restore team {{ $labels.team }} {{ $labels.service }}"
+          summary: "team {{ $labels.team }}/{{ $labels.service }} has an old IP of {{ $labels.depends_on }} baked in"
+          action: "./lab-azure.sh restore team {{ $labels.team }} {{ $labels.service }}"
         data:
           - refId: A
             relativeTimeRange: { from: 300, to: 0 }
@@ -129,8 +129,8 @@ groups:
         labels:
           severity: critical
         annotations:
-          summary: "{{ $labels.service }} (DMZ compartida) caido -- afecta a TODOS los equipos"
-          accion: "prioridad maxima: ./lab-azure.sh restore dmz {{ $labels.service }}"
+          summary: "{{ $labels.service }} (shared DMZ) down -- affects ALL teams"
+          action: "maximum priority: ./lab-azure.sh restore dmz {{ $labels.service }}"
         data:
           - refId: A
             relativeTimeRange: { from: 300, to: 0 }
@@ -155,8 +155,8 @@ groups:
         labels:
           severity: low
         annotations:
-          summary: "{{ $labels.service }} (decoy) caido hace 5+ min"
-          accion: "cosmetico, no bloquea ningun reto -- restaurar sin prisa"
+          summary: "{{ $labels.service }} (decoy) down for 5+ min"
+          action: "cosmetic, doesn't block any challenge -- restore without urgency"
         data:
           - refId: A
             relativeTimeRange: { from: 600, to: 0 }
@@ -181,8 +181,8 @@ groups:
         labels:
           severity: medium
         annotations:
-          summary: "dnsmasq (vm-wg-gateway) no responde en 10.10.0.4:53"
-          accion: "nadie resuelve nombres, pero ningun reto se cae -- las env vars siguen en IP (ver docs/plans/internal-dns.md, Resiliencia)"
+          summary: "dnsmasq (vm-wg-gateway) not responding at 10.10.0.4:53"
+          action: "nobody resolves names, but no challenge goes down -- env vars still use IPs (see docs/plans/internal-dns.md, Resilience)"
         data:
           - refId: A
             relativeTimeRange: { from: 300, to: 0 }

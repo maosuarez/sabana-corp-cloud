@@ -2,351 +2,343 @@
 
 This file provides guidance to Claude Code (claude.ai/code) when working with code in this repository.
 
-## Qué es esto
+## What is this
 
-Infraestructura como código para **Sabana Corp**, el CTF de la Semana de Ingeniería de la
-Universidad de la Sabana. Todo corre en Azure Container Instances (ACI) dentro de una VNet
-sin salida a internet — se llega tras romper un portal cautivo y autenticarse por VPN.
+Infrastructure as code for **Sabana Corp**, the CTF for Engineering Week at Universidad de la 
+Sabana. Everything runs on Azure Container Instances (ACI) within a VNet with no internet 
+egress — access is granted only after breaking through a captive portal and authenticating via VPN.
 
-Estado actual: `lab-azure.sh` levanta la infraestructura base (RG, VNet, subredes) y orquesta el
-despliegue de la DMZ compartida, la VM del wiki, el gateway WireGuard y N equipos usando los YAML
-de `yamls/`.
+Current status: `lab-azure.sh` stands up the base infrastructure (RG, VNet, subnets) and 
+orchestrates deployment of the shared DMZ, the wiki VM, the WireGuard gateway, and N teams using 
+YAML templates from `yamls/`.
 
-**Todo lo implementado se probó end-to-end el 2026-08-08**: `up`, `deploy-dmz`, `deploy-wiki-vm`,
-`deploy-wg-gateway`, `add-team`/`add-team-range` y el flujo VPN completo. Cuando un comentario del
-código diga "validado 2026-08-08", se refiere a esa corrida. CTFd se validó por separado el
-2026-08-11 (ver nota abajo). Lo que **no** está implementado ni probado es: Provisioner (sin
-imagen en ningún repo todavía) y `docs/plans/network-segmentation-nsgs.md`, marcado como diseño.
-Este archivo se va actualizando a medida que se toman decisiones de diseño.
+**All implementations were validated end-to-end on 2026-08-08**: `up`, `deploy-dmz`, 
+`deploy-wiki-vm`, `deploy-wg-gateway`, `add-team`/`add-team-range`, and the complete VPN flow. 
+When a code comment says "validated 2026-08-08", it refers to that run. CTFd was validated 
+separately on 2026-08-11 (see note below). What is **not** implemented or tested: Provisioner 
+(no image in any repo yet) and `docs/plans/network-segmentation-nsgs.md`, marked as design. 
+This file updates as design decisions are made.
 
-**CTFd (`docs/plans/ctfd-deployment.md`): F1 implementada del lado de `../sabana-corp-CTFd`
-(manifiesto de challenges + seed script). F2 — validada end-to-end contra Azure real
-(2026-08-11)**: `./lab-azure.sh deploy-ctfd-vm` crea `vm-ctfd` en `snet-dmz-vm` (nginx +
-ctfd/gunicorn + MariaDB + Redis vía docker-compose), completa `/setup` y carga los 5
-challenges/flags sin ningún click manual — `PRESET_ADMIN_TOKEN` (`CTFD_PRESET_ADMIN_TOKEN`)
-reemplaza el Access Token generado a mano, y `../sabana-corp-CTFd/scripts/seed_setup.py` (corre
-dentro del contenedor `ctfd`, no en la VM host) completa el wizard de `/setup` — necesario porque
-CTFd bloquea toda request, incluida la API, hasta que ese wizard termina. La corrida real encontró
-y corrigió dos bugs: `TRUSTED_HOSTS` no incluía `localhost` (los scripts de seed le pegan a CTFd
-por ahí, vía nginx, y sin eso Werkzeug devuelve 500) y `az vm run-command invoke` no propaga el
-exit code del script remoto (`--output table` puede reportar éxito con un script que en realidad
-tronó) — cualquier `run-command` nuevo debe capturar e inspeccionar `value[0].message`, no confiar
-en el exit code de `az`. Secretos vía bloque `CTFD_*` en `yamls/.env.secrets` (a diferencia del
-wiki, que usa literales). Imagen `${DOCKERHUB_USER}/sabana-corp-ctfd`, publicada por
-`../sabana-corp-CTFd/.github/workflows/deploy.yml`. **Los challenges se cargan `hidden` por
-defecto — `/challenges` se ve vacío incluso logueado como admin hasta que se publican
-(`CTFD_SEED_PUBLISH=1` en el deploy, o `seed_challenges.py --publish` sin recrear la VM).** Es
-diseño, no un bug — comandos exactos y runbook del día del evento en "Runbook del día del evento",
+**CTFd (`docs/plans/ctfd-deployment.md`): F1 implemented on the `../sabana-corp-CTFd` side
+(challenge manifest + seed script). F2 — validated end-to-end against real Azure
+(2026-08-11)**: `./lab-azure.sh deploy-ctfd-vm` creates `vm-ctfd` in `snet-dmz-vm` (nginx +
+ctfd/gunicorn + MariaDB + Redis via docker-compose), completes `/setup`, and loads 5
+challenges/flags with zero manual clicks — `PRESET_ADMIN_TOKEN` (`CTFD_PRESET_ADMIN_TOKEN`)
+replaces the manually-generated Access Token, and `../sabana-corp-CTFd/scripts/seed_setup.py` 
+(runs inside the `ctfd` container, not on the host VM) completes the `/setup` wizard — necessary 
+because CTFd blocks all requests, including API, until that wizard finishes. The actual run found 
+and fixed two bugs: `TRUSTED_HOSTS` did not include `localhost` (seed scripts hit CTFd there, 
+via nginx, and without it Werkzeug returns 500) and `az vm run-command invoke` does not propagate 
+the exit code of the remote script (`--output table` can report success for a script that actually 
+failed) — any new `run-command` must capture and inspect `value[0].message`, not rely on `az` 
+exit codes. Secrets via the `CTFD_*` block in `yamls/.env.secrets` (unlike the wiki, which uses 
+literals). Image `${DOCKERHUB_USER}/sabana-corp-ctfd`, published by
+`../sabana-corp-CTFd/.github/workflows/deploy.yml`. **Challenges load as `hidden` by
+default — `/challenges` appears empty even when logged in as admin until they are published
+(`CTFD_SEED_PUBLISH=1` in the deploy, or `seed_challenges.py --publish` without recreating the VM).** 
+This is by design, not a bug — exact commands and event-day runbook in "Event-day runbook",
 `docs/plans/ctfd-deployment.md`.
 
-**DNS interno (`docs/plans/internal-dns.md`): validado contra Azure real (2026-08-10).** dnsmasq en
-`vm-wg-gateway`, dominio `sabanacorp.internal`, comandos `dns-sync [--from-azure]` / `dns-check
-<fqdn>`. Fase 0 (assumption checks) y Fase 1 (dnsmasq en VM viva) completadas; zona completa
-sincronizada y verificada end-to-end. Caveat: contenedores desplegados antes de esta sesión
-(team1, team2, DMZ) no reciben `dnsConfig` todavía (requeriría recreación); nuevos deploys lo
-reciben automáticamente. Detalle completo en `docs/plans/internal-dns.md`.
+**Internal DNS (`docs/plans/internal-dns.md`): validated against real Azure (2026-08-10).** dnsmasq 
+on `vm-wg-gateway`, domain `sabanacorp.internal`, commands `dns-sync [--from-azure]` / `dns-check
+<fqdn>`. Phase 0 (assumption checks) and Phase 1 (dnsmasq on live VM) complete; full zone
+synchronized and validated end-to-end. Caveat: containers deployed before this session
+(team1, team2, DMZ) do not yet receive `dnsConfig` (would require recreation); new deployments 
+receive it automatically. Full detail in `docs/plans/internal-dns.md`.
 
-**Observabilidad (`docs/plans/observability-monitoring.md`): F1+F2 implementados y validados
-contra Azure real (2026-08-10).** `./lab-azure.sh deploy-monitor-vm` crea `vm-monitor` en
-`snet-mgmt` (Prometheus + blackbox_exporter + Grafana + node_exporter, sin IP pública, managed
-identity con rol `Reader` solo sobre este Resource Group). `gen_targets.py` (systemd timer, 60s)
-descubre servicios vía `az container list` y genera targets de sondeo (`probe_success` por
-team/service) + `sabana_ip_drift`; el estado de control plane (`sabana_container_state`,
-`sabana_container_restart_count`) se refresca cada 5 min con `az container show` **por
-contenedor**, paralelizado y cacheado — corrección respecto al plan original, que asumía
-(incorrectamente) que `az container list` traía `instanceView` poblado; no lo hace, es la misma
-limitación ya documentada para `print_container_states()` en `lab-azure.sh`. Dos dashboards
-("Muro de equipos", "Muro DMZ + infraestructura") y 7 de las 9 reglas de alerta del plan
-provisionados como código en Grafana Unified Alerting (sin contact points). Quedan pendientes:
-`BotColgado` (requiere health endpoint en `bot.js`, repo `sabana-corp-network`, fuera de este
-repo) y `GatewaySinHandshakes` (requeriría subir el alcance de la managed identity más allá de
-`Reader`, no se justifica todavía). F3 (`restore team/dmz`) y F4 (logs) siguen sin implementar.
-Detalle completo en `docs/plans/observability-monitoring.md`.
+**Observability (`docs/plans/observability-monitoring.md`): F1+F2 implemented and validated
+against real Azure (2026-08-10).** `./lab-azure.sh deploy-monitor-vm` creates `vm-monitor` in
+`snet-mgmt` (Prometheus + blackbox_exporter + Grafana + node_exporter, no public IP, managed
+identity with `Reader` role on this Resource Group only). `gen_targets.py` (systemd timer, 60s)
+discovers services via `az container list` and generates probe targets (`probe_success` per
+team/service) + `sabana_ip_drift`; control plane state (`sabana_container_state`,
+`sabana_container_restart_count`) refreshes every 5 min via `az container show` **per
+container**, parallelized and cached — correction from the original plan, which assumed
+(incorrectly) that `az container list` returned populated `instanceView`; it does not, same
+limitation already documented for `print_container_states()` in `lab-azure.sh`. Two dashboards
+("Team Dashboard", "DMZ + Infrastructure Dashboard") and 7 of 9 alert rules from the plan
+provisioned as code in Grafana Unified Alerting (no contact points). Pending:
+`BotHanging` (requires health endpoint in `bot.js`, repo `sabana-corp-network`, outside this
+repo) and `GatewayNoHandshakes` (would require raising managed identity scope beyond
+`Reader`, not justified yet). F3 (`restore team/dmz`) and F4 (logs) remain unimplemented.
+Full detail in `docs/plans/observability-monitoring.md`.
 
-**`nmap-sabana-corp` (`docs/plans/nmap-sabana-corp.md`): paquete implementado en
-`tools/nmap-sabana-corp/`, NO validado contra el lab real.** Herramienta de descubrimiento de red
-para el participante (Node ≥18, ESM, cero dependencias de runtime): alcance derivado del túnel
-WireGuard activo (o `--conf`/`--cidr`), hechos medidos con TCP connect scan real en dos fases, y
-nombres decorados vía PTR contra el resolutor del lab (`10.200.0.1`) — nunca al revés. `npm --test`
-pasa (36 pruebas unitarias, sin infraestructura real). `generate-wg-client.sh` genera
-`nmap-sabana-corp.mjs` (bundle de un solo archivo, vía `tools/nmap-sabana-corp/scripts/build-bundle.mjs`,
-sin bundler externo) junto a cada `.conf` en `yamls/generated/wg-clients/`, y el README del
-participante (`yamls/templates/wg-client-readme.md.tpl`) ya lo documenta. Workflow de publicación
-(`.github/workflows/nmap-sabana-corp.yml`, tag `nmap-v*`) escrito pero nunca corrido — falta
-`NPM_TOKEN` en secrets y reservar el nombre en npm. **Pendiente, explícitamente fuera de esta
-implementación**: los tres supuestos de Fase 0 del plan (PTR desde un túnel real, comportamiento de
-puerto cerrado en ACI, presión de conntrack en el gateway con N equipos), el `sysctl` de conntrack
-en `vm-wg-gateway` (Fase 3), y la publicación real a npm. No tocar `yamls/wg-gateway/cloud-init.yaml`
-ni el gateway vivo para eso sin releer "Lo que se rompe primero" en el plan primero — es el riesgo
-real del diseño.
+**`nmap-sabana-corp` (`docs/plans/nmap-sabana-corp.md`): package implemented in
+`tools/nmap-sabana-corp/`, NOT validated against the real lab.** Network discovery tool
+for the participant (Node ≥18, ESM, zero runtime dependencies): scope derived from the active
+WireGuard tunnel (or `--conf`/`--cidr`), facts measured via real two-phase TCP connect scan, and
+names decorated via PTR against the lab resolver (`10.200.0.1`) — never the reverse. `npm --test`
+passes (36 unit tests, no real infrastructure). `generate-wg-client.sh` generates
+`nmap-sabana-corp.mjs` (single-file bundle, via `tools/nmap-sabana-corp/scripts/build-bundle.mjs`,
+no external bundler) alongside each `.conf` in `yamls/generated/wg-clients/`, and the participant
+README (`yamls/templates/wg-client-readme.md.tpl`) already documents it. Publication workflow
+(`.github/workflows/nmap-sabana-corp.yml`, tag `nmap-v*`) written but never run — missing
+`NPM_TOKEN` in secrets and npm package name reservation. **Pending, explicitly outside this
+implementation**: the three Phase 0 assumptions in the plan (PTR from a real tunnel, closed-port
+behavior in ACI, conntrack pressure on the gateway with N teams), the `sysctl` conntrack tuning
+on `vm-wg-gateway` (Phase 3), and actual npm publication. Do not touch `yamls/wg-gateway/cloud-init.yaml`
+or the live gateway without re-reading "What breaks first" in the plan first — that is the
+real design risk.
 
-## Comandos
+## Commands
 
 ```bash
 export DOCKERHUB_USER="..."
 export DOCKERHUB_TOKEN="..."   # Docker Hub -> Account Settings -> Security -> New Access Token
-cp yamls/.env.secrets.example yamls/.env.secrets   # solo la primera vez, editar flags/secretos reales
+cp yamls/.env.secrets.example yamls/.env.secrets   # first time only; edit actual flags/secrets
 
-./lab-azure.sh up                # RG + VNet + subredes base + delega snet-dmz-shared a ACI
-./lab-azure.sh deploy-dmz        # despliega los 13 contenedores compartidos de la DMZ (wiki aparte, ver abajo)
-./lab-azure.sh deploy-wiki-vm    # crea vm-wiki (wiki+wiki-db via docker-compose) en snet-dmz-vm
-./lab-azure.sh deploy-wg-gateway # crea vm-wg-gateway (WireGuard, IP pública) + túnel admin en snet-wg-gateway
-./lab-azure.sh add-team 1        # crea snet-team1, despliega sus 4 contenedores y su túnel WireGuard
-./lab-azure.sh add-team 2        # repetir por cada equipo adicional (mismo comando, distinto N)
-./lab-azure.sh add-team-range 1 20   # despliega equipos 1..20 (secuencial, detiene en error)
-./lab-azure.sh add-team-range 1 20 4 # idem pero 4 equipos en paralelo (subnets/peers WG secuenciales)
-./lab-azure.sh wg-team-peer 1    # genera túnel WireGuard para team1 (para equipos desplegados antes del gateway)
-./lab-azure.sh dns-sync          # empuja yamls/generated/dns/*.hosts al gateway (1 invocación, ya se llama sola)
-./lab-azure.sh dns-sync --from-azure # reconstruye la zona completa desde 'az container list' (reparación)
-./lab-azure.sh dns-check <fqdn>  # resuelve <fqdn> desde el gateway y lo compara con la IP real de Azure
-./lab-azure.sh test [N]          # atajo de prueba: up + deploy-dmz + add-team N (N=1 por defecto, sin VPN)
-./lab-azure.sh status            # estado de DMZ, DMZ-VM, gateway WireGuard y equipos
-./lab-azure.sh down              # borra el Resource Group completo (pide confirmación "si")
+./lab-azure.sh up                # RG + VNet + base subnets + delegate snet-dmz-shared to ACI
+./lab-azure.sh deploy-dmz        # deploy 13 shared DMZ containers (wiki separate, see below)
+./lab-azure.sh deploy-wiki-vm    # create vm-wiki (wiki+wiki-db via docker-compose) in snet-dmz-vm
+./lab-azure.sh deploy-wg-gateway # create vm-wg-gateway (WireGuard, public IP) + admin tunnel in snet-wg-gateway
+./lab-azure.sh add-team 1        # create snet-team1, deploy 4 containers and WireGuard tunnel
+./lab-azure.sh add-team 2        # repeat for each additional team (same command, different N)
+./lab-azure.sh add-team-range 1 20   # deploy teams 1..20 (sequential, stops on error)
+./lab-azure.sh add-team-range 1 20 4 # same but 4 teams in parallel (subnets/peers sequential)
+./lab-azure.sh wg-team-peer 1    # generate WireGuard tunnel for team1 (for teams deployed before gateway)
+./lab-azure.sh dns-sync          # push yamls/generated/dns/*.hosts to gateway (1 call, auto-called)
+./lab-azure.sh dns-sync --from-azure # rebuild full zone from 'az container list' (repair)
+./lab-azure.sh dns-check <fqdn>  # resolve <fqdn> from gateway and compare with real Azure IP
+./lab-azure.sh test [N]          # test shortcut: up + deploy-dmz + add-team N (N=1 default, no VPN)
+./lab-azure.sh status            # status of DMZ, DMZ-VM, WireGuard gateway, and teams
+./lab-azure.sh down              # delete entire Resource Group (asks for "yes" confirmation)
 ```
 
-Prerrequisitos: `az` CLI instalado y logueado (`az login`) contra la suscripción "Azure for
-Students" del tenant de la Universidad de la Sabana; `envsubst` (paquete `gettext-base`) para
-`yamls/generate-{team,dmz,wg-client}.sh`. Cliente WireGuard (paquete `wireguard-tools`) solo
-necesario en el operador para usar los `.conf` generados — no es prerrequisto del script.
+Prerequisites: `az` CLI installed and logged in (`az login`) against the "Azure for
+Students" subscription in Universidad de la Sabana's tenant; `envsubst` (package `gettext-base`) for
+`yamls/generate-{team,dmz,wg-client}.sh`. WireGuard client (package `wireguard-tools`) only
+needed on the operator machine to use the generated `.conf` files — not a prerequisite of the script.
 
-Diseño de `up`/`down`: todo el lab vive en un único Resource Group
-(`rg-ctf-semana-ingenieria-test`), así que "down" es un solo comando que lo destruye entero.
-Mantener este invariante al extender el script — no crear recursos fuera del RG del lab.
+Design of `up`/`down`: the entire lab lives in a single Resource Group
+(`rg-ctf-semana-ingenieria-test`), so "down" is a single command that destroys it all.
+Maintain this invariant when extending the script — do not create resources outside the lab RG.
 
-## Costos
+## Costs
 
 ```bash
-az consumption usage list --output table   # consumo detallado
+az consumption usage list --output table   # detailed consumption
 az billing account list -o table
 az consumption budget list --output table
 ```
 
-Suscripción es "Azure for Students" (crédito, no pay-as-you-go): `az consumption usage list`
-suele devolver 403/AuthorizationFailed en este tipo de suscripción — no es un error de config, es
-una limitación conocida de Azure for Students. En ese caso el balance de crédito solo se ve en el
-portal: portal.azure.com → Suscripciones → Azure for Students → Cost analysis (o el widget de
-crédito restante en el dashboard).
+Subscription is "Azure for Students" (credit, not pay-as-you-go): `az consumption usage list`
+often returns 403/AuthorizationFailed on this subscription type — not a config error, a known
+limitation of Azure for Students. In that case credit balance is visible only in the portal:
+portal.azure.com → Subscriptions → Azure for Students → Cost analysis (or the remaining credit
+widget on the dashboard).
 
-## Decisión de diseño: 1 YAML = 1 contenedor = 1 IP
+## Design decision: 1 YAML = 1 container = 1 IP
 
-Cada contenedor se despliega como su propio `az container create --file <container>.yaml`
-(container group de un solo contenedor), no agrupado con otros — así cada uno recibe su propia
-IP privada dentro de la subred de su equipo o de la DMZ, en vez de compartir una sola IP como
-pasaba en el primer prototipo (`team1-edificio`, ya reemplazado).
+Each container is deployed as its own `az container create --file <container>.yaml`
+(a single-container container group), not grouped with others — so each receives its own
+private IP within its team subnet or DMZ, instead of sharing a single IP like the first
+prototype (`team1-edificio`, now replaced).
 
-## Decisión de diseño: xss-bot es N instancias (una por equipo), no 1 bot compartido
+## Design decision: xss-bot is N instances (one per team), not 1 shared bot
 
-Se evaluó consolidar el `xss-bot` de todos los equipos en un único contenedor compartido (en
-`snet-mgmt`, con acceso saliente a cada `snet-teamX` pero sin entrante desde ellas vía NSG) para
-ahorrar RAM: hoy son N contenedores Playwright/Chromium, uno por equipo.
+We considered consolidating the `xss-bot` of all teams into a single shared container (in
+`snet-mgmt`, with outbound access to each `snet-teamX` but no inbound from them via NSG) to
+save RAM: today it is N Playwright/Chromium containers, one per team.
 
-Se descartó. Motivo: en un CTF donde los equipos compiten explotando XSS contra el bot, el
-aislamiento entre equipos es parte del modelo de amenaza, no solo un costo a optimizar. Un bot
-compartido introduce:
-- **Punto único de falla**: si un equipo tumba o cuelga el bot (payload `while(true)`, etc.), el
-  Reto 1 se cae para todos los equipos simultáneamente, no solo para el atacante.
-- **Superficie cruzada**: cualquier bug en el loop que visita las colas de N equipos arriesga
-  filtrar cookies/timing de un equipo hacia otro.
-- **Complejidad de red no validada**: requeriría NSGs para el aislamiento direccional
-  (`snet-mgmt` → `snet-teamX` sí, `snet-teamX` → `snet-mgmt` no), algo que el proyecto aún no ha
-  probado (ver nota de NSGs en "Arquitectura de red objetivo").
+We rejected it. Reason: in a CTF where teams compete by exploiting XSS against the bot, team
+isolation is part of the threat model, not just a cost to optimize. A shared bot introduces:
+- **Single point of failure**: if one team crashes or hangs the bot (payload `while(true)`, etc.),
+  Challenge 1 fails for all teams simultaneously, not just the attacker.
+- **Cross-contamination surface**: any bug in the loop visiting N teams' queues risks leaking
+  cookies/timing from one team to another.
+- **Unvalidated network complexity**: would require NSGs for directional isolation
+  (`snet-mgmt` → `snet-teamX` yes, `snet-teamX` → `snet-mgmt` no), something the project has not
+  yet tested (see NSG note in "Target network architecture").
 
-El ahorro de RAM no justifica esa complejidad de forma preventiva. Revisar esta decisión solo si
-el costo real (medido, no estimado) se vuelve un problema — no antes.
+The RAM savings do not justify that complexity preemptively. Revisit this decision only if
+the real cost (measured, not estimated) becomes a problem — not before.
 
-## Decisión de diseño: plantillas + generadores, no YAML estático
+## Design decision: templates + generators, not static YAML
 
-Los YAML que dependen de un equipo o de secretos compartidos no se escriben a mano ni se
-commitean resueltos: viven como plantillas en `yamls/templates/*.yaml.tpl` con variables
-`${...}` (envsubst), y `yamls/generate-team.sh <N>` / `yamls/generate-dmz.sh` las resuelven en
-`yamls/generated/*.yaml` (gitignored). `lab-azure.sh` (`add-team`, `deploy-dmz`) llama a estos
-generadores y despliega su salida — no hay que tocar `yamls/` a mano en el flujo normal.
+YAMLs that depend on a team number or shared secrets are not written by hand nor committed resolved:
+they live as templates in `yamls/templates/*.yaml.tpl` with `${...}` variables (envsubst), and
+`yamls/generate-team.sh <N>` / `yamls/generate-dmz.sh` resolve them into
+`yamls/generated/*.yaml` (gitignored). `lab-azure.sh` (`add-team`, `deploy-dmz`) calls these
+generators and deploys their output — no manual touching of `yamls/` in normal workflow.
 
-- **`templates/team-*.yaml.tpl`** (database, webapp, linux-server, xss-bot) — agnósticas al
-  número de equipo vía `${TEAM}`; misma plantilla sirve para team1, team2, ..., teamN. Imágenes
-  `maosuarez/sabana-lab-*:latest` (repo `../sabana-corp-network`), subred `snet-team${TEAM}`.
-- **`templates/dmz-*.yaml.tpl`** (filesrv, parking, 11 decoy-*) — 13 contenedores, un solo
-  despliegue compartido, no dependen de ningún equipo. Imágenes propias en Docker Hub
-  `maosuarez` (`sabanacorp-filesrv`, `sabanacorp-parking`, `sabanacorp-decoy`), construidas a
-  partir de `../sabana-corp-dmz` con el contenido del reto ya horneado. Subred fija
-  `snet-dmz-shared`. El wiki no está en ACI (ver `deploy-wiki-vm`); sus plantillas
-  `dmz-wiki*.yaml.tpl` fueron borradas porque se generaban sin desplegarse.
+- **`templates/team-*.yaml.tpl`** (database, webapp, linux-server, xss-bot) — agnostic to team
+  number via `${TEAM}`; same template works for team1, team2, ..., teamN. Images
+  `maosuarez/sabana-lab-*:latest` (repo `../sabana-corp-network`), subnet `snet-team${TEAM}`.
+- **`templates/dmz-*.yaml.tpl`** (filesrv, parking, 11 decoy-*) — 13 containers, single
+  shared deployment, independent of team number. Images in Docker Hub under `maosuarez`
+  (`sabanacorp-filesrv`, `sabanacorp-parking`, `sabanacorp-decoy`), built from `../sabana-corp-dmz`
+  with challenge content baked in. Fixed subnet `snet-dmz-shared`. Wiki not in ACI (see
+  `deploy-wiki-vm`); its templates `dmz-wiki*.yaml.tpl` deleted because they were generated but
+  never deployed.
 
-Las flags/secretos de los servicios por equipo (`FLAG_*`, `PIVOT_SSH_PASSWORD`, `BOT_SECRET`,
-contraseñas de DB, `JWT_SIGNING_SECRET`) **son los mismos para todos los equipos** — vienen de
-`yamls/.env.secrets` (gitignored, plantilla en `.env.secrets.example`), nunca de `${TEAM}`.
-Decisión deliberada: CTFd valida una única flag por reto para cualquier equipo, así que cargarla
-una vez en CTFd sirve para las N instancias. Los secretos de la DMZ (parking en su plantilla, y
-los del wiki en `generate-wiki-vm.sh`) siguen como literales — la DMZ es un único despliegue, no
-N copias.
+Flags/secrets for per-team services (`FLAG_*`, `PIVOT_SSH_PASSWORD`, `BOT_SECRET`,
+DB passwords, `JWT_SIGNING_SECRET`) **are identical across all teams** — sourced from
+`yamls/.env.secrets` (gitignored, template in `.env.secrets.example`), never from `${TEAM}`.
+Deliberate decision: CTFd validates a single flag per challenge for any team, so loading it
+once in CTFd serves all N instances. DMZ secrets (parking in its template, and wiki secrets in
+`generate-wiki-vm.sh`) remain as literals — the DMZ is a single deployment, not N copies.
 
-ACI no da DNS entre container groups distintos, así que un contenedor que depende de la IP de
-otro (`webapp`→`database`, `xss-bot`→`webapp`) no puede usar el nombre del servicio como en
-docker-compose. `deploy_dmz`/`deploy_team` en `lab-azure.sh` resuelven esto automáticamente:
-despliegan la dependencia primero, leen su IP con `az container show/create --query
-ipAddress.ip`, y la inyectan con `sed` en el YAML generado del dependiente antes de desplegarlo.
-(El wiki dejó de necesitar esta inyección al migrar de ACI a una VM con docker-compose, donde
-la resolución de nombres entre servicios es nativa.) Ver `yamls/README.md` para el detalle de
-ese orden si hay que depurarlo.
+ACI provides no DNS between distinct container groups, so a container that depends on another's IP
+(`webapp`→`database`, `xss-bot`→`webapp`) cannot use the service name like in docker-compose.
+`deploy_dmz`/`deploy_team` in `lab-azure.sh` solve this automatically: deploy the dependency first,
+read its IP with `az container show/create --query ipAddress.ip`, and inject it via `sed` into the
+dependent's generated YAML before deploying. (Wiki no longer needs this injection after migrating
+from ACI to a VM with docker-compose, where inter-service name resolution is native.) See
+`yamls/README.md` for deployment order details if debugging is needed.
 
-Hay un plan para montar DNS interno del lab (dnsmasq en `vm-wg-gateway`, FQDN para equipos y DMZ,
-resolución también desde el PC del participante por el túnel WireGuard) en
-`docs/plans/internal-dns.md` — **diseño, no implementado**, y pensado para ejecutarse *después* de
-que la DMZ completa esté montada. Ojo: ese plan no elimina el `sed` de IPs de arriba (el orden de
-despliegue lo sigue exigiendo), solo agrega nombres encima.
+There is a plan to set up lab internal DNS (dnsmasq on `vm-wg-gateway`, FQDNs for teams and DMZ,
+resolution also from participant PC via WireGuard tunnel) in
+`docs/plans/internal-dns.md` — **design, not implemented**, intended to run *after* the complete
+DMZ is deployed. Note: that plan does not eliminate the IP `sed` above (deployment order still
+requires it), it just adds names on top.
 
-## Decisión de diseño: paralelismo en add-team-range
+## Design decision: parallelism in add-team-range
 
-Desplegar un solo equipo (`add-team N`) es secuencial: subred → contenedores (con dependencias
-db→webapp→xss-bot) → túnel WireGuard. La operación es lenta por el pool de IPs esperando en ACI
-(~30s por 4 contenedores).
+Deploying a single team (`add-team N`) is sequential: subnet → containers (with
+dependencies db→webapp→xss-bot) → WireGuard tunnel. The operation is slow due to the IP pool wait
+in ACI (~30s per 4 containers).
 
-`add-team-range <inicio> <fin> [paralelismo]` permite desplegar múltiples equipos concurrentes:
+`add-team-range <start> <end> [concurrency]` enables deploying multiple teams concurrently:
 
-- **Paso 1 (secuencial)**: crea todas las subredes de golpe (`add_team_subnet` para cada equipo).
-  Motivo: `az network vnet subnet create` concurrentes sobre la MISMA VNet chocan frecuentemente
-  con `409 AnotherOperationInProgress` — Azure no permite operaciones de subred paralelas en una
-  VNet.
-- **Paso 2 (paralelo, tope configurable)**: `deploy_team_workload` (generación YAML + deploy de
-  contenedores) de N equipos simultáneos, con tope de concurrencia vía job control bash
-  (`wait -n`). Este paso es lo lento: cada equipo espera sus 4 IPs (~30s), en paralelo los equipos
-  se aceleran (4 equipos × 30s secuencial = 2 min; en paralelo ÷ tope de 4 ≈ 30s).
-- **Paso 2.5 (secuencial, un solo push)**: `sync_lab_dns` — sincroniza el DNS interno (ver
-  "Decisión de diseño: DNS interno" abajo) para todo el rango en **una** invocación de
-  `run-command`, no una por equipo. Va entre el paso 2 y el paso 3 por el mismo motivo que el
-  paso 3: toca `vm-wg-gateway`.
-- **Paso 3 (secuencial)**: `create_wg_team_peer` por equipo para generar túneles WireGuard.
-  Motivo: los peers usan `az vm run-command invoke` contra la misma VM (`vm-wg-gateway`), que
-  ejecuta `add-peer.sh.tpl` de forma serial — correrlos en paralelo arriesga corromper la config
-  compartida (`/etc/wireguard/wg0.conf`).
+- **Step 1 (sequential)**: create all subnets at once (`add_team_subnet` for each team).
+  Reason: concurrent `az network vnet subnet create` on the SAME VNet frequently collide
+  with `409 AnotherOperationInProgress` — Azure does not permit parallel subnet operations on one VNet.
+- **Step 2 (parallel, configurable limit)**: `deploy_team_workload` (YAML generation + container
+  deployment) for N teams simultaneously, with concurrency limit via bash job control
+  (`wait -n`). This step is the slow one: each team waits for 4 IPs (~30s); in parallel teams
+  speed up (4 teams × 30s sequential = 2 min; in parallel ÷ limit of 4 ≈ 30s).
+- **Step 2.5 (sequential, single push)**: `sync_lab_dns` — syncs internal DNS (see
+  "Design decision: internal DNS" below) for the entire range in **one** `run-command` call,
+  not one per team. Goes between step 2 and step 3 for the same reason as step 3: touches `vm-wg-gateway`.
+- **Step 3 (sequential)**: `create_wg_team_peer` per team to generate WireGuard tunnels.
+  Reason: peers use `az vm run-command invoke` against the same VM (`vm-wg-gateway`), which
+  runs `add-peer.sh.tpl` serially — running them in parallel risks corrupting the shared config
+  (`/etc/wireguard/wg0.conf`).
 
-**Regla general, no solo de los peers**: TODA escritura sobre `vm-wg-gateway` va en un paso
-secuencial. No es solo corrupción de archivos — `az vm run-command invoke` corre a través de la
-extensión RunCommand de la VM, que es **de un solo hilo por VM**: invocaciones concurrentes contra
-la misma máquina se serializan o fallan con un conflicto de operación en curso. Esto aplica igual
-a los peers WireGuard (paso 3) y al DNS (paso 2.5) — cualquier función nueva que escriba en el
-gateway (vía `run-command`) tiene que sumarse a un paso secuencial existente o crear uno propio,
-nunca correr dentro del paso 2 paralelo.
+**General rule, not just for peers**: ALL writes to `vm-wg-gateway` go in a sequential step. It is
+not just file corruption — `az vm run-command invoke` runs through the VM's RunCommand extension,
+which is **single-threaded per VM**: concurrent invocations against the same machine serialize or
+fail with an operation-in-progress conflict. This applies equally to WireGuard peers (step 3)
+and DNS (step 2.5) — any new function that writes to the gateway (via `run-command`) must join an
+existing sequential step or create its own, never run inside step 2 parallel.
 
-Ejemplo: `./lab-azure.sh add-team-range 1 20 4` crea 20 equipos con 4 en paralelo (vs. 20×
-secuencial): subnets ~5s (paso 1), workloads ~2-3 min (paso 2 en paralelo), DNS ~10s (paso 2.5,
-O(1) no O(N)), peers ~20s (paso 3), total ~3 min vs. ~10 min secuencial.
+Example: `./lab-azure.sh add-team-range 1 20 4` creates 20 teams with 4 in parallel (vs. 20×
+sequential): subnets ~5s (step 1), workloads ~2-3 min (step 2 parallel), DNS ~10s (step 2.5,
+O(1) not O(N)), peers ~20s (step 3), total ~3 min vs. ~10 min sequential.
 
-## Decisión de diseño: DNS interno con dnsmasq en el gateway
+## Design decision: internal DNS with dnsmasq on the gateway
 
-Un único `dnsmasq` en `vm-wg-gateway` (no una VM aparte: es la única máquina que ya está en el
-camino de todos los clientes VPN y de la VNet), sirviendo una zona plana de registros A generados
-desde el estado real de Azure, reenviando todo lo demás a Azure DNS (`168.63.129.16`).
+A single `dnsmasq` instance on `vm-wg-gateway` (not a separate VM: it is the only machine already
+in the path of all VPN clients and the VNet), serving a flat zone of A records generated from
+real Azure state, forwarding everything else to Azure DNS (`168.63.129.16`).
 
-- **Dominio `sabanacorp.internal`, explícitamente no `.local`**: `.local` está reservado por RFC
-  6762 para mDNS/Bonjour — en macOS (siempre) y en Linux con `avahi` (Ubuntu de escritorio, por
-  defecto), una consulta a `algo.local` se resuelve por multicast en la red local en vez de irse al
-  DNS configurado. Sería el peor bug posible para un evento: funciona en la máquina del operador,
-  falla al azar en el MacBook de un participante, sin nada en los logs. `.internal` es TLD
-  reservado por ICANN (2024) para uso privado, nunca se delega ni se intercepta.
-- **Zona plana, sin split-horizon**: todo el mundo resuelve todo (excepto `snet-mgmt`, que no se
-  publica). Descubrir `webapp.team7.sabanacorp.internal` es reconocimiento — sabor de CTF, no una
-  fuga — y el límite real ya existe y ya está probado: es `iptables` en el gateway (resuelve, no
-  alcanza), no el DNS.
-- **Punto más importante, para no descubrirlo por las malas después**: las variables de entorno de
-  los contenedores (`DB_HOST`, `WEBAPP_BASE_URL`) **se quedan en IP a propósito, con el `sed`
-  intacto**. El DNS es una capa de nombres para humanos/herramientas/navegación dentro del CTF, NO
-  el plano de datos de los retos. Si alguien "arregla" `<DATABASE_IP>` poniéndole un FQDN, el DNS
-  pasa de ser cosmético a ser dependencia dura de todos los retos, sin que nadie lo haya decidido
-  así — no lo hagas sin releer `docs/plans/internal-dns.md` ("El huevo y la gallina") primero.
-  Consecuencia directa: un dnsmasq caído no tumba ningún reto ya desplegado.
-- Comandos: `dns-sync [--from-azure]`, `dns-check <fqdn>`. Detalle completo, plan de pruebas,
-  matriz de riesgos y comportamiento por sistema operativo del cliente WireGuard (split-DNS real en
-  Windows/macOS, no-tan-real en Linux) en `docs/plans/internal-dns.md`.
+- **Domain `sabanacorp.internal`, explicitly not `.local`**: `.local` is reserved by RFC
+  6762 for mDNS/Bonjour — on macOS (always) and Linux with `avahi` (Ubuntu desktop, by
+  default), a query to `algo.local` resolves via multicast on the local network instead of going to
+  the configured DNS. This would be the worst possible bug for an event: works on the operator's
+  machine, fails randomly on a participant's MacBook, nothing in the logs. `.internal` is an ICANN-reserved
+  (2024) TLD for private use, never delegated or intercepted.
+- **Flat zone, no split-horizon**: everyone resolves everything (except `snet-mgmt`, not
+  published). Discovering `webapp.team7.sabanacorp.internal` is reconnaissance — CTF flavor, not
+  a leak — and the real boundary already exists and is tested: it is `iptables` on the gateway
+  (resolves, cannot reach), not DNS.
+- **Most important: to avoid discovering this the hard way later**: container environment variables
+  (`DB_HOST`, `WEBAPP_BASE_URL`) **stay as IPs on purpose, with `sed` intact**. DNS is a name
+  layer for humans/tools/navigation within the CTF, NOT the challenge data plane. If someone "fixes"
+  `<DATABASE_IP>` by putting an FQDN in it, DNS becomes a hard dependency of all challenges, without
+  anyone deciding so — do not do this without re-reading `docs/plans/internal-dns.md` ("The chicken
+  and the egg") first. Direct consequence: a crashed dnsmasq does not take down any already-deployed
+  challenge.
+- Commands: `dns-sync [--from-azure]`, `dns-check <fqdn>`. Full detail, test plan,
+  risk matrix, and client WireGuard OS behavior (real split-DNS on Windows/macOS, not-so-real on
+  Linux) in `docs/plans/internal-dns.md`.
 
-## Arquitectura de red objetivo
+## Target network architecture
 
-**vnet-ctf-lab** (`10.0.0.0/8`) — red sin internet, alcanzable solo tras el portal cautivo +
-VPN.
+**vnet-ctf-lab** (`10.0.0.0/8`) — internet-isolated network, reachable only after breaking through
+a captive portal + VPN.
 
-- **snet-dmz-shared** (`10.50.0.0/24`) — servicios compartidos por todos los equipos:
-  - CTFd (flags y scoreboard) — implementado y validado end-to-end (2026-08-11), pero vive en
-    `snet-dmz-vm`, no aquí (misma limitación de delegación exclusiva a ACI que sacó al wiki, ver
-    `snet-dmz-vm` abajo). Ver `docs/plans/ctfd-deployment.md`
-  - Provisioner (FastAPI) — habla con la API de Azure/VPC para aprovisionar recursos de equipo — no implementado todavía
-  - Objetivo de XSS contra un admin-bot — implementado como `filesrv`/`wiki`/`parking`/decoys (ver `yamls/templates/dmz-*.yaml.tpl`); el admin-bot en sí vive en `xss-bot` por equipo (`snet-teamN`), no en la DMZ
-- **snet-teamX** (`10.60.X.0/24`, una por equipo, `X` = número de equipo) — red propia de cada
-  equipo, creada bajo demanda con `./lab-azure.sh add-team <X>`:
-  - File-Srv — vulnerable a acceso anónimo, pivote hacia el siguiente nivel (vive en la DMZ compartida, no aquí — ver nota abajo)
-  - Wiki-Int — pistas criptográficas (idem, DMZ compartida)
-  - servicios decoy — simulan ruido corporativo (idem, DMZ compartida)
-  - Parqueadero — reto final (idem, DMZ compartida)
-  - Lo que sí vive en `snet-teamX`: `database`, `webapp`, `linux-server`, `xss-bot` (retos 1-3 del edificio de cada equipo)
-- **snet-mgmt** (`10.99.0.0/24`) — red de gestión, creada por `up`. Aloja `vm-monitor`
-  (Prometheus + blackbox_exporter + Grafana + node_exporter, sin IP pública), creada por
-  `./lab-azure.sh deploy-monitor-vm` — **validado end-to-end 2026-08-10**, ver
-  `docs/plans/observability-monitoring.md`. Grafana solo alcanzable por el túnel admin de
-  WireGuard; `snet-mgmt` no se publica en el DNS interno a propósito (ver "Decisión de diseño:
-  DNS interno" arriba). No confundir con `dmz-decoy-monitor` (perfil `monitor`, señuelo del CTF
-  en `snet-dmz-shared` que imita un Grafana/Prometheus y no monitorea nada).
-- **snet-dmz-vm** (`10.51.0.0/24`) — DMZ paralela para servicios que no corren en ACI. Hoy aloja
-  `vm-wiki` (wiki + wiki-db vía docker-compose), migrada de ACI porque BookStack requiere PID 1
-  real (s6-overlay, limitación de ACI+VNet — validado end-to-end 2026-08-08). No puede ir en
-  `snet-dmz-shared` porque esa subred está delegada a `Microsoft.ContainerInstance/containerGroups`
-  (delegación exclusiva, no admite VMs). Ver `docs/plans/wiki-on-vm.md` para el detalle. También
-  aloja (`./lab-azure.sh deploy-ctfd-vm`, **validado end-to-end 2026-08-11**) `vm-ctfd`: nginx +
-  ctfd/gunicorn + MariaDB + Redis vía docker-compose, mismo motivo (docker-compose completo de
-  upstream, no vale la pena partirlo en YAML de ACI). Ver
-  `docs/plans/ctfd-deployment.md`.
-- **snet-wg-gateway** (`10.10.0.0/28`) — única entrada al lab **y DNS interno del lab**:
-  `vm-wg-gateway` (IP pública, WireGuard UDP 51820, IP privada estática `10.10.0.4`), creada por
-  `./lab-azure.sh deploy-wg-gateway`. `add-team <N>` genera automáticamente el túnel de ese equipo
-  (acceso solo a su propia `snet-teamN` + ambas DMZ) y un `.conf` en `yamls/generated/wg-clients/`;
-  hay además un túnel admin con acceso a todo `10.0.0.0/8`. El control de acceso por túnel se
-  aplica con `iptables` en la propia VM, no con NSGs (más detalle, validación end-to-end y estado
-  de pruebas en `docs/plans/wireguard-vpn-gateway.md`, **validado end-to-end 2026-08-08**). Además
-  corre `dnsmasq` (dominio `sabanacorp.internal`, IP privada `10.10.0.4` para la VNet, IP de túnel
-  `10.200.0.1` para clientes VPN) — ver "Decisión de diseño: DNS interno" abajo y
-  `docs/plans/internal-dns.md`.
+- **snet-dmz-shared** (`10.50.0.0/24`) — services shared by all teams:
+  - CTFd (flags and scoreboard) — implemented and validated end-to-end (2026-08-11), but lives in
+    `snet-dmz-vm`, not here (same exclusive-delegation limitation to ACI that removed the wiki,
+    see `snet-dmz-vm` below). See `docs/plans/ctfd-deployment.md`
+  - Provisioner (FastAPI) — talks to Azure/VPC API to provision team resources — not yet implemented
+  - XSS bot target — implemented as `filesrv`/`wiki`/`parking`/decoys (see `yamls/templates/dmz-*.yaml.tpl`);
+    the admin bot itself lives in `xss-bot` per team (`snet-teamN`), not in DMZ
+- **snet-teamX** (`10.60.X.0/24`, one per team, `X` = team number) — dedicated network per
+  team, created on-demand with `./lab-azure.sh add-team <X>`:
+  - File-Srv — vulnerable to anonymous access, pivot to next level (lives in shared DMZ, not here — see note below)
+  - Wiki-Int — cryptography hints (idem, shared DMZ)
+  - Decoy services — simulate corporate noise (idem, shared DMZ)
+  - Parking — final challenge (idem, shared DMZ)
+  - What actually lives in `snet-teamX`: `database`, `webapp`, `linux-server`, `xss-bot`
+    (challenges 1-3 of the building challenges per team)
+- **snet-mgmt** (`10.99.0.0/24`) — management network, created by `up`. Hosts `vm-monitor`
+  (Prometheus + blackbox_exporter + Grafana + node_exporter, no public IP), created by
+  `./lab-azure.sh deploy-monitor-vm` — **validated end-to-end 2026-08-10**, see
+  `docs/plans/observability-monitoring.md`. Grafana reachable only via WireGuard admin tunnel;
+  `snet-mgmt` not published in internal DNS on purpose (see "Design decision: internal DNS"
+  above). Do not confuse with `dmz-decoy-monitor` (profile `monitor`, CTF decoy in
+  `snet-dmz-shared` that mimics Grafana/Prometheus and does not monitor anything).
+- **snet-dmz-vm** (`10.51.0.0/24`) — parallel DMZ for services that do not run in ACI. Currently hosts
+  `vm-wiki` (wiki + wiki-db via docker-compose), migrated from ACI because BookStack requires
+  real PID 1 (s6-overlay, ACI+VNet limitation — validated end-to-end 2026-08-08). Cannot go in
+  `snet-dmz-shared` because that subnet is delegated to `Microsoft.ContainerInstance/containerGroups`
+  (exclusive delegation, VMs not supported). See `docs/plans/wiki-on-vm.md` for details. Also hosts
+  (`./lab-azure.sh deploy-ctfd-vm`, **validated end-to-end 2026-08-11**) `vm-ctfd`: nginx +
+  ctfd/gunicorn + MariaDB + Redis via docker-compose, same reason (full upstream docker-compose,
+  not worth splitting into ACI YAML). See `docs/plans/ctfd-deployment.md`.
+- **snet-wg-gateway** (`10.10.0.0/28`) — sole lab entry point **and lab internal DNS**:
+  `vm-wg-gateway` (public IP, WireGuard UDP 51820, static private IP `10.10.0.4`), created by
+  `./lab-azure.sh deploy-wg-gateway`. `add-team <N>` automatically generates that team's tunnel
+  (access only to its own `snet-teamN` + both DMZ subnets) and a `.conf` in `yamls/generated/wg-clients/`;
+  there is also an admin tunnel with access to all of `10.0.0.0/8`. Per-tunnel access control is
+  applied via `iptables` on the VM itself, not NSGs (more detail, validation, and test status in
+  `docs/plans/wireguard-vpn-gateway.md`, **validated end-to-end 2026-08-08**). Also runs `dnsmasq`
+  (domain `sabanacorp.internal`, private IP `10.10.0.4` for VNet, tunnel IP `10.200.0.1` for VPN
+  clients) — see "Design decision: internal DNS" below and `docs/plans/internal-dns.md`.
 
-Nota de implementación vs. arquitectura original: File-Srv/Wiki-Int/decoys/Parqueadero se
-describieron inicialmente como parte de la red de cada equipo, pero el repo `sabana-corp-dmz` los
-implementó como un único despliegue compartido en `snet-dmz-shared` (ver
-`../sabana-corp-dmz/README.md`). Se siguió esa implementación real en vez de la descripción
-original — si se decide separarlos por equipo más adelante, hay que revisar esta sección.
+Implementation note vs. original architecture: File-Srv/Wiki-Int/decoys/Parking were initially
+described as part of each team's network, but the `sabana-corp-dmz` repo implemented them as a
+single shared deployment in `snet-dmz-shared` (see `../sabana-corp-dmz/README.md`). This real
+implementation was followed instead of the original description — if they are separated per team
+later, this section must be revisited.
 
-Conector VPN: implementado y validado end-to-end 2026-08-08, ver `docs/plans/wireguard-vpn-gateway.md`.
-Dentro de la VNet, el acceso entre subredes sigue siendo libre albedrío total (Azure enruta entre
-subredes de la misma VNet por defecto, y no hay un solo NSG de segmentación creado sobre
-`snet-team*`/`snet-dmz-*`/`snet-mgmt`) — un equipo puede alcanzar la subred de otro equipo, o
-`snet-mgmt`, sin restricción, **si entra por fuera del gateway VPN** (ej. con acceso directo a `az`).
-Propuesta de reglas para cerrar eso a nivel de subred (equipos aislados entre sí, nadie puede
-llegar a `snet-mgmt` salvo staff, DMZ no puede iniciar conexiones hacia equipos) documentada en
-`docs/plans/network-segmentation-nsgs.md` — **no implementada todavía**, solo diseño; es un
-control complementario al del gateway VPN, no un prerrequisito.
+VPN connector: implemented and validated end-to-end 2026-08-08, see `docs/plans/wireguard-vpn-gateway.md`.
+Within the VNet, inter-subnet access remains completely open (Azure routes between VNet subnets by
+default, and zero segmentation NSGs are created on `snet-team*`/`snet-dmz-*`/`snet-mgmt`) — a team
+can reach another team's subnet or `snet-mgmt` without restriction, **if entering outside the VPN
+gateway** (e.g., with direct `az` access). Proposed rules to lock this down at subnet level (teams
+isolated from each other, nobody reaches `snet-mgmt` except staff, DMZ cannot initiate to teams)
+documented in `docs/plans/network-segmentation-nsgs.md` — **not yet implemented**, design only;
+it is a complementary control to the VPN gateway, not a prerequisite.
 
-## Notas de archivos
+## File notes
 
-- `lab-azure.sh` — orquesta todo el ciclo de vida: infraestructura base (`up`), DMZ
-  (`deploy-dmz`), equipos (`add-team <N>`, `add-team-range`), wiki-vm (`deploy-wiki-vm`), ctfd-vm
-  (`deploy-ctfd-vm`, validado end-to-end 2026-08-11), monitor-vm
-  (`deploy-monitor-vm`), gateway VPN (`deploy-wg-gateway`), DNS interno (`dns-sync`,
-  `dns-check`), estado (`status`) y destrucción (`down`). Llama a los generadores de `yamls/` y
-  resuelve las dependencias de IP entre contenedores. Implementa paralelismo configurable en
-  `add-team-range` (subnets secuenciales, workloads paralelos, DNS en un solo push, peers
-  secuenciales).
-- `.env` — `DOCKERHUB_USER` / `DOCKERHUB_TOKEN`; el script no lo carga automáticamente, hay que
-  exportar las variables a mano antes de correr cualquier comando que despliegue contenedores.
-- `yamls/` — plantillas, generadores y documentación del despliegue por contenedor. Incluye:
-  - `templates/*.yaml.tpl` + `generate-*.sh` para DMZ/equipos/wiki-vm/ctfd-vm/monitor-vm/clientes
-    WireGuard
-  - `generate-dns-hosts.sh` — genera bloques de zona DNS (`generated/dns/*.hosts`)
-  - `wg-gateway/` — VM cloud-init (WireGuard + dnsmasq), scripts remotos para gestión de peers y
-    de la zona DNS del gateway
-  - `ctfd-vm/` — VM cloud-init (Docker) + `conf/nginx/http.conf` vendored desde
-    `../sabana-corp-CTFd`. `generate-ctfd-vm.sh` arma el bundle en `generated/ctfd/` (secretos
-    desde `.env.secrets`, bloque `CTFD_*`, a diferencia del wiki). Ver
+- `lab-azure.sh` — orchestrates the full lifecycle: base infrastructure (`up`), DMZ
+  (`deploy-dmz`), teams (`add-team <N>`, `add-team-range`), wiki-vm (`deploy-wiki-vm`), ctfd-vm
+  (`deploy-ctfd-vm`, validated end-to-end 2026-08-11), monitor-vm
+  (`deploy-monitor-vm`), VPN gateway (`deploy-wg-gateway`), internal DNS (`dns-sync`,
+  `dns-check`), status (`status`), and teardown (`down`). Calls the `yamls/` generators and
+  resolves IP dependencies between containers. Implements configurable parallelism in
+  `add-team-range` (sequential subnets, parallel workloads, single DNS push, sequential peers).
+- `.env` — `DOCKERHUB_USER` / `DOCKERHUB_TOKEN`; the script does not load it automatically,
+  variables must be exported manually before running any container deployment command.
+- `yamls/` — templates, generators, and per-container deployment documentation. Includes:
+  - `templates/*.yaml.tpl` + `generate-*.sh` for DMZ/teams/wiki-vm/ctfd-vm/monitor-vm/WireGuard
+    clients
+  - `generate-dns-hosts.sh` — generates DNS zone blocks (`generated/dns/*.hosts`)
+  - `wg-gateway/` — cloud-init VM (WireGuard + dnsmasq), remote scripts for peer and
+    gateway DNS zone management
+  - `ctfd-vm/` — cloud-init VM (Docker) + `conf/nginx/http.conf` vendored from
+    `../sabana-corp-CTFd`. `generate-ctfd-vm.sh` builds the bundle in `generated/ctfd/` (secrets
+    from `.env.secrets`, `CTFD_*` block, unlike the wiki). See
     `docs/plans/ctfd-deployment.md`.
-  - `monitor/` — VM cloud-init, docker-compose (Prometheus + blackbox_exporter + Grafana +
-    node_exporter), config de sondeo (`prometheus/`, `blackbox/`), provisioning de Grafana
-    (datasource + dashboards "Muro de equipos"/"Muro DMZ" + reglas de alerta Unified Alerting) y
-    `remote/gen_targets.py` (descubrimiento vía `az container list`, corre en `vm-monitor` cada
-    60s por systemd timer). Ver `docs/plans/observability-monitoring.md`.
-  - `generated/` (gitignored) — YAML resueltos, clientes WireGuard generados, bloques de zona DNS
-    y el bundle de `vm-monitor`
-  Ver `yamls/README.md` para el detalle.
+  - `monitor/` — cloud-init VM, docker-compose (Prometheus + blackbox_exporter + Grafana +
+    node_exporter), probe config (`prometheus/`, `blackbox/`), Grafana provisioning
+    (datasource + dashboards "Team Dashboard"/"DMZ Dashboard" + Unified Alerting rules) and
+    `remote/gen_targets.py` (discovery via `az container list`, runs on `vm-monitor` every
+    60s via systemd timer). See `docs/plans/observability-monitoring.md`.
+  - `generated/` (gitignored) — resolved YAML, generated WireGuard clients, DNS zone blocks,
+    and `vm-monitor` bundle
+  See `yamls/README.md` for details.

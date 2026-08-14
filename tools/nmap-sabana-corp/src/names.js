@@ -1,16 +1,16 @@
-// "Cómo se resuelven los nombres": PTR contra el resolutor del lab (10.200.0.1), nunca el del
-// SO -- new dns.Resolver() + setServers() habla c-ares directo a esa IP e ignora la
-// configuracion DNS del sistema. Degrada a "sin nombres" si no responde en 1s; el DNS decora,
-// nunca manda. Ver docs/plans/nmap-sabana-corp.md.
+// "How names are resolved": PTR against the lab's resolver (10.200.0.1), never the OS's --
+// new dns.Resolver() + setServers() talks c-ares directly to that IP and ignores the
+// system's DNS configuration. Degrades to "no names" if it doesn't respond in 1s; DNS decorates,
+// never mandates. See docs/plans/nmap-sabana-corp.md.
 
 import dns from 'node:dns'
 import { RESOLVER_IP, RESOLVER_TIMEOUT_MS } from './catalog.js'
 
-// No se cancela la promesa individual al vencer su timeout -- eso exigiria resolver.cancel(),
-// que cancela TODAS las consultas en vuelo del resolver, no solo esta, y aqui puede haber otras
-// legitimamente en curso (las demas IPs de resolveNames). Se deja que resuelva/rechace en
-// segundo plano y se descarta el resultado; resolveNames() se encarga de limpiar el resolver
-// entero una sola vez, cuando ya no le queda ninguna consulta propia por esperar.
+// Individual promise is not canceled on timeout -- that would require resolver.cancel(),
+// which cancels ALL in-flight queries from the resolver, not just this one, and there may be
+// others legitimately in flight here (the other IPs from resolveNames). It's left to
+// resolve/reject in the background and the result is discarded; resolveNames() handles cleaning
+// up the entire resolver once, when no more queries of its own are left to wait for.
 function withTimeout(promise, ms) {
   return new Promise((resolve, reject) => {
     const timer = setTimeout(() => reject(new Error('timeout')), ms)
@@ -30,11 +30,11 @@ function withTimeout(promise, ms) {
 async function isResolverUp(resolver, resolverIp) {
   try {
     await withTimeout(
-      // Se consulta la IP del propio resolutor, nunca 127.0.0.1: Node/c-ares resuelve el
-      // loopback localmente sin tocar la red, lo que daria un falso "activo" aunque el resolutor
-      // configurado no responda.
+      // The resolver's own IP is queried, never 127.0.0.1: Node/c-ares resolves
+      // loopback locally without touching the network, which would give a false "up" even if
+      // the configured resolver doesn't respond.
       resolver.reverse(resolverIp).catch((err) => {
-        // NXDOMAIN/sin datos es una respuesta real del resolutor, no una caida.
+        // NXDOMAIN/no data is a real resolver response, not a crash.
         if (err.code === 'ENOTFOUND' || err.code === 'ENODATA') return []
         throw err
       }),
@@ -51,8 +51,8 @@ export async function resolveNames(ips, { resolverIp = RESOLVER_IP } = {}) {
   resolver.setServers([resolverIp])
 
   if (!(await isResolverUp(resolver, resolverIp))) {
-    // Nada mas queda pendiente en este resolver (el propio chequeo de arriba). Cancelar aqui
-    // evita que la consulta perdedora de la carrera del timeout mantenga vivo el event loop.
+    // Nothing else is pending on this resolver (the check above already covers it). Cancelling
+    // here prevents the losing query in the timeout race from keeping the event loop alive.
     resolver.cancel()
     return { fqdnByIp: new Map(), resolverUp: false }
   }
@@ -67,8 +67,8 @@ export async function resolveNames(ips, { resolverIp = RESOLVER_IP } = {}) {
       }
     })
   )
-  // Idem: para aqui ya no queda ninguna consulta propia por esperar, aunque alguna haya perdido
-  // su carrera de timeout y siga colgada en el resolver.
+  // Same: at this point, no queries of its own are left to wait for, even if some lost
+  // their timeout race and are still hung on the resolver.
   resolver.cancel()
 
   return { fqdnByIp: new Map(entries), resolverUp: true }

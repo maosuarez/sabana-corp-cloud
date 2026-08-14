@@ -1,187 +1,76 @@
-# Plan: mover dmz-wiki + dmz-wiki-db a una VM con docker-compose
+# Plan: Move dmz-wiki + dmz-wiki-db to a VM with docker-compose
 
-## Estado
+## Status
 
-**Validado end-to-end 2026-08-08.** Cuota desbloqueada tras upgrade a Pay-As-You-Go
-(`StandardDsv7Family`, 10 vCPUs en eastus2). `./lab-azure.sh deploy-wiki-vm` corrido con
-éxito: `vm-wiki` (`Standard_D2s_v7`, `snet-dmz-vm`, IP `10.51.0.4`) desplegada, cloud-init
-instaló Docker, `docker compose up -d` levantó `wiki` (Up, sin restart) y `wiki-db`
-(healthy) — s6-overlay arranca bien con PID 1 real, confirmando el diagnóstico de por qué
-fallaba en ACI. `curl http://localhost` en la VM devuelve 302 (redirect a `/login`,
-comportamiento normal de BookStack). Riesgo pendiente de la sección anterior también
-verificado: routing cross-subnet `snet-dmz-vm` → `snet-dmz-shared` funciona sin NSGs
-(ping y `curl` a `dmz-filesrv:8080` desde la VM devuelven 200/OK).
+**Validated end-to-end 2026-08-08.** Quota unblocked after upgrade to Pay-As-You-Go (`StandardDsv7Family`, 10 vCPUs in eastus2). `./lab-azure.sh deploy-wiki-vm` ran successfully: `vm-wiki` (`Standard_D2s_v7`, `snet-dmz-vm`, IP `10.51.0.4`) deployed, cloud-init installed Docker, `docker compose up -d` brought up `wiki` (Up, no restart) and `wiki-db` (healthy) — s6-overlay starts fine with real PID 1, confirming the diagnosis of why it failed in ACI. `curl http://localhost` on the VM returns 302 (redirect to `/login`, normal BookStack behavior). Pending risk from the previous section also verified: cross-subnet routing `snet-dmz-vm` → `snet-dmz-shared` works without NSGs (ping and `curl` to `dmz-filesrv:8080` from the VM return 200/OK).
 
-`lab-azure.sh:deploy_dmz()` ya no despliega `dmz-wiki`/`dmz-wiki-db` como contenedores
-ACI (se quitaron del loop de despliegue) — el wiki vive solo en `vm-wiki` ahora.
+`lab-azure.sh:deploy_dmz()` no longer deploys `dmz-wiki`/`dmz-wiki-db` as ACI containers (removed from deployment loop) — wiki lives only in `vm-wiki` now.
 
-Pendiente real: `az vm run-command invoke` sí funcionó (no hubo que caer a SSH +
-`nsg-jumpbox`). Falta solo validar el wiki desde un navegador real (vía el flujo VPN, aún
-sin implementar) y decidir si la VM se apaga fuera de horarios de prueba
-(`az vm deallocate`) para no acumular costo.
+Real pending item: `az vm run-command invoke` did work (didn't have to fall back to SSH + `nsg-jumpbox`). Only left to do: validate wiki from a real browser (via VPN flow, not yet implemented) and decide whether to shut down the VM off-hours (`az vm deallocate`) to not accumulate cost.
 
-Histórico (bloqueo ya resuelto, se deja para contexto):
+Historical (blocking issue already resolved, kept for context):
 
-Scripts escritos (`yamls/templates/wiki-vm-compose.yml.tpl`, `yamls/generate-wiki-vm.sh`,
-`yamls/wiki-vm/cloud-init.yaml`, `lab-azure.sh deploy-wiki-vm`) pero **NO PROBADOS ni una
-vez** — el bloqueo de cuota (ver abajo) resultó ser más duro de lo que parecía al escribir
-la primera versión de este documento: no es que falte pedir el aumento, es que **Azure for
-Students no es elegible para pedir aumento de quota de VM en absoluto** (confirmado
-2026-08-02, ni self-service ni por ticket de soporte — el formulario de Azure lo dice
-explícito: "Your subscription isn't eligible for a quota increase. To request a quota
-increase, first upgrade to a Pay-As-You-Go subscription"). Todas las familias de VM con
-quota ya asignada por defecto (Basic A, Standard A0-A7, B-series, D v2/v3/v4) resultaron
-ser `SkuNotAvailable` (capacity restriction) al intentar desplegar — no son usables pase lo
-que pase. La única familia confirmada desplegable (`Standard_D2s_v7`, familia
-`StandardDsv7Family`) tiene quota 0 y no se puede subir.
+Scripts written (`yamls/templates/wiki-vm-compose.yml.tpl`, `yamls/generate-wiki-vm.sh`, `yamls/wiki-vm/cloud-init.yaml`, `lab-azure.sh deploy-wiki-vm`) but **NEVER TESTED** — the quota blocking (see below) turned out harder than it looked when writing the first version of this document: it's not that a request is missing, it's that **Azure for Students is ineligible to request VM quota increases at all** (confirmed 2026-08-02, neither self-service nor support ticket — Azure's form says explicitly: "Your subscription isn't eligible for a quota increase. To request a quota increase, first upgrade to a Pay-As-You-Go subscription"). All VM families with default quota assigned (Basic A, Standard A0-A7, B-series, D v2/v3/v4) turned out to be `SkuNotAvailable` (capacity restriction) on deployment attempt — not usable regardless. The only family confirmed deployable (`Standard_D2s_v7`, `StandardDsv7Family` family) has quota 0 and can't be increased.
 
-Dos caminos para desbloquear, sin decidir todavía:
-1. Upgrade de la suscripción a Pay-As-You-Go (decisión de facturación, no tomada).
-2. Abandonar la VM para este caso y correr WireGuard/wiki en Azure Container Instances en
-   vez de VM (ACI soporta agregar la capability `NET_ADMIN` a un contenedor Linux — sin
-   confirmar si alcanza para crear la interfaz TUN que WireGuard necesita).
+Two paths to unblock, not yet decided:
+1. Upgrade subscription to Pay-As-You-Go (billing decision, not made).
+2. Abandon the VM for this case and run WireGuard/wiki in Azure Container Instances instead of VM (ACI supports adding `NET_ADMIN` capability to a Linux container — unconfirmed if it's enough to create the TUN interface WireGuard needs).
 
-Los scripts de esta sección se dejan escritos y documentados para no repetir el trabajo de
-diseño cuando se desbloquee cualquiera de los dos caminos, pero **nadie los ha corrido**.
-La cuenta de Azure del lab fue limpiada por completo (`./lab-azure.sh down`) el
-2026-08-02, así que ni siquiera hay infraestructura viva contra la cual validarlos ahora
-mismo.
+Scripts in this section are left written and documented to not repeat design work when either path unlocks, but **no one has run them**. The lab's Azure account was completely cleaned (`./lab-azure.sh down`) on 2026-08-02, so there's not even infrastructure alive to validate them against right now.
 
-## Motivación
+## Motivation
 
-`dmz-wiki` (BookStack sobre `linuxserver/bookstack`) no corre en ACI: la imagen usa
-s6-overlay v3, que exige ser PID 1 de su propio namespace de procesos, y los container
-groups de ACI integrados a una VNet (`subnetIds`) no se lo garantizan — el arranque
-falla siempre con `s6-overlay-suexec: fatal: can only run as pid 1`, ExitCode 100, a
-los ~6s. Confirmado de forma determinística contra el YAML real sin modificar (ver
-memoria de proyecto `aci_platform_limitations` / `dmz_wiki_blocked`). No es un bug de
-config — es una limitación de la plataforma ACI, no arreglable desde el Dockerfile o el
-YAML del wiki.
+`dmz-wiki` (BookStack from `linuxserver/bookstack`) doesn't run on ACI: the image uses s6-overlay v3, which requires being PID 1 in its own process namespace, and ACI container groups integrated into a VNet (`subnetIds`) don't guarantee that — startup always fails with `s6-overlay-suexec: fatal: can only run as pid 1`, ExitCode 100, around ~6s. Confirmed deterministically against unmodified real YAML (see project memory `aci_platform_limitations` / `dmz_wiki_blocked`). Not a config bug — it's an ACI platform limitation, not fixable from the Dockerfile or wiki YAML.
 
-Alternativa evaluada y descartada por ahora: reconstruir BookStack desde cero sin
-s6-overlay (mismo patrón que `filesrv`/`wiki-db`, imagen propia horneada). Válida pero
-más trabajo que simplemente correr el `docker-compose.yml` que `sabana-corp-dmz` ya
-tiene y que nunca dependió de ACI.
+Alternative evaluated and rejected for now: rebuild BookStack from scratch without s6-overlay (same pattern as `filesrv`/`wiki-db`, custom baked image). Valid but more work than simply running the `docker-compose.yml` that `sabana-corp-dmz` already has and which never depended on ACI.
 
-Un solo movimiento (wiki + wiki-db a una VM, vía docker-compose) resuelve tres
-problemas de una vez:
+One move (wiki + wiki-db to a VM, via docker-compose) solves three issues at once:
 
-1. **s6-overlay funciona.** Docker plano en una VM da PID 1 real al entrypoint — sin
-   reconstruir BookStack ni cazar una imagen/tag alternativo sin s6.
-2. **Vuelve el volumen `wiki_bookstack_config:/config`.** Cierra el gap de
-   persistencia documentado en `yamls/README.md` ("Persistencia — pendiente para
-   `wiki`"): hoy, sin volumen, BookStack pierde sus keys/config si el contenedor de
-   ACI se reinicia.
-3. **Vuelve la red interna `wiki_backend`.** En el `docker-compose.yml` original,
-   `wiki-db` solo es alcanzable desde `wiki` vía una red bridge interna
-   (`internal: true`). Hoy en ACI, `dmz-wiki-db` está expuesto directamente en
-   `snet-dmz-shared` (10.50.0.4:3306) sin ese aislamiento. En la VM, docker-compose
-   restaura el aislamiento tal como está diseñado.
+1. **s6-overlay works.** Plain Docker on a VM gives real PID 1 to the entrypoint — without rebuilding BookStack or hunting for an alternative image/tag without s6.
+2. **The `wiki_bookstack_config:/config` volume returns.** Closes the persistence gap documented in `yamls/README.md` ("Persistence — pending for `wiki`"): today, without a volume, BookStack loses its keys/config if the ACI container restarts.
+3. **The internal `wiki_backend` network returns.** In the original `docker-compose.yml`, `wiki-db` is only reachable from `wiki` via an internal bridge network (`internal: true`). Today on ACI, `dmz-wiki-db` is exposed directly on `snet-dmz-shared` (10.50.0.4:3306) without that isolation. On the VM, docker-compose restores the isolation as designed.
 
-El resto de la DMZ y de team1 (18 contenedores ya corriendo en ACI) sigue igual, sin
-tocarse. Solo se mueven estos dos servicios.
+The rest of the DMZ and team1 (18 containers already running on ACI) stay the same, untouched. Only these two services move.
 
-## Pregunta resuelta: ¿puede la VM ir en `snet-dmz-shared`?
+## Resolved question: can the VM go in `snet-dmz-shared`?
 
-**No.** `snet-dmz-shared` está delegada a `Microsoft.ContainerInstance/containerGroups`
-(`az network vnet subnet update --delegations ...`, ver `lab-azure.sh:delegate_dmz_subnet`).
-La delegación de subred en Azure es exclusiva: una vez delegada a un servicio, esa
-subred solo admite recursos de ese tipo — la NIC de una VM no puede desplegarse ahí. El
-intento fallaría con un error de conflicto de delegación.
+**No.** `snet-dmz-shared` is delegated to `Microsoft.ContainerInstance/containerGroups` (`az network vnet subnet update --delegations ...`, see `lab-azure.sh:delegate_dmz_subnet`). Subnet delegation in Azure is exclusive: once delegated to a service, that subnet only accepts resources of that type — a VM's NIC cannot be deployed there. The attempt would fail with a delegation conflict error.
 
-**Resuelto**: se creó `snet-dmz-vm` (`10.51.0.0/24`) en `lab-azure.sh:create_vnet` — una
-DMZ paralela, sin delegar, exclusiva para servicios que necesitan Docker plano en vez de
-ACI. `snet-mgmt` (10.99.0.0/24) queda reservada para el jumpbox/staff, sin mezclarse con
-servicios de reto — separación más limpia si más adelante se necesitan reglas NSG
-distintas para una y otra (ver `docs/plans/network-segmentation-nsgs.md`: el borrador de
-reglas ya trata `snet-dmz-vm` igual que `snet-dmz-shared` — alcanzable desde los equipos,
-sin permiso de iniciar conexiones hacia ellos — y a `snet-mgmt` como plano de staff,
-inalcanzable para equipos).
+**Resolved**: `snet-dmz-vm` (`10.51.0.0/24`) was created in `lab-azure.sh:create_vnet` — a parallel DMZ, not delegated, exclusive for services needing plain Docker instead of ACI. `snet-mgmt` (10.99.0.0/24) is reserved for the jumpbox/staff, not mixed with challenge services — cleaner separation if different NSG rules are needed for each later (see `docs/plans/network-segmentation-nsgs.md`: the draft rules already treat `snet-dmz-vm` the same as `snet-dmz-shared` — reachable from teams, no permission to initiate connections toward them — and `snet-mgmt` as the staff plane, unreachable for teams).
 
-El enrutamiento entre subredes de la misma VNet ya funciona por defecto en Azure (sin
-peering ni rutas adicionales, ver `yamls/README.md` "Acceso desde la red interna") — una
-VM en `snet-dmz-vm` puede alcanzar `10.60.1.0/24` (team1) sin configuración extra, y
-viceversa. Ningún NSG bloquea esto hoy porque no se ha creado ninguno sobre esas
-subredes — ver `docs/plans/network-segmentation-nsgs.md` para el diseño (todavía sin
-implementar) que lo restringiría.
+Routing between subnets of the same VNet already works by default in Azure (no peering or additional routes, see `yamls/README.md` "Access from the internal network") — a VM in `snet-dmz-vm` can reach `10.60.1.0/24` (team1) without extra configuration, and vice versa. No NSG blocks this today because none have been created on those subnets — see `docs/plans/network-segmentation-nsgs.md` for the design (not yet implemented) that would restrict it.
 
-Ventaja adicional sobre el estado actual: la VM tiene una **IP privada fija propia**
-(asignada al crear la NIC), no una IP por DHCP que hay que leer con
-`az container show --query ipAddress.ip` y parchear con `sed` en el YAML del
-dependiente (como hoy hace `deploy_dmz` para `dmz-wiki-db` → `dmz-wiki`). Eso simplifica
-el `docker-compose.yml` (los hostnames del compose, `wiki-db`, siguen funcionando vía la
-red de Docker dentro de la misma VM — no dependen para nada de la IP de Azure).
+Additional advantage over current state: the VM has a **fixed private IP of its own** (assigned when creating the NIC), not a DHCP IP that needs to be read with `az container show --query ipAddress.IP` and patched with `sed` in the dependent's YAML (as today `deploy_dmz` does for `dmz-wiki-db` → `dmz-wiki`). That simplifies the `docker-compose.yml` (the compose's hostnames, `wiki-db`, still work via Docker's internal network within the same VM — they don't depend on Azure's IP at all).
 
-## Bloqueo actual: Azure for Students no puede pedir quota de VM
+## Current blocker: Azure for Students can't request VM quota
 
-Confirmado 2026-08-02 con pruebas reales de `az vm create` (no solo lectura de quotas):
+Confirmed 2026-08-02 with real `az vm create` tests (not just quota reads):
 
-- Cuota de `Microsoft.Compute` en `eastus2` (y se verificó que la asignación por defecto es
-  idéntica en todas las regiones probadas: eastus, westus2, centralus, southcentralus,
-  westus, westeurope) es **0** para toda familia de VM moderna
-  (`StandardDsv7Family`/`StandardDsv6Family`/etc).
-- Las familias que sí tienen quota >0 por defecto (`basicAFamily`, `standardA0_A7Family`,
-  `standardBSFamily`, `standardDv3Family`, `standardDv4Family`, ...) son **todas**
-  `SkuNotAvailable` (capacity restriction) al intentar un `az vm create` real — quota
-  fantasma, Azure no tiene capacidad para desplegarlas en esta suscripción pase lo que
-  pase.
-- La única familia confirmada realmente desplegable es `StandardDsv7Family`
-  (`Standard_D2s_v7` pasa validación hasta topar con el quota check), pero está en 0.
-- El formulario de aumento de quota (`New Quota Request` / `Create a support request` →
-  Service and subscription limits) responde explícito: **"Your subscription isn't
-  eligible for a quota increase. To request a quota increase, first upgrade to a
-  Pay-As-You-Go subscription."** No hay ticket de soporte que lo evite — es una regla de
-  elegibilidad por tipo de oferta, no un problema de aprobación.
+- Quota for `Microsoft.Compute` in `eastus2` (and verified that default allocation is identical across all tested regions: eastus, westus2, centralus, southcentralus, westus, westeurope) is **0** for all modern VM families (`StandardDsv7Family`/`StandardDsv6Family`/etc).
+- Families that do have quota >0 by default (`basicAFamily`, `standardA0_A7Family`, `standardBSFamily`, `standardDv3Family`, `standardDv4Family`, ...) are **all** `SkuNotAvailable` (capacity restriction) when attempting a real `az vm create` — phantom quota, Azure has no capacity to deploy them on this subscription regardless.
+- The only family confirmed actually deployable is `StandardDsv7Family` (`Standard_D2s_v7` passes validation until hitting the quota check), but is at 0.
+- The quota increase form (`New Quota Request` / `Create a support request` → Service and subscription limits) responds explicitly: **"Your subscription isn't eligible for a quota increase. To request a quota increase, first upgrade to a Pay-As-You-Go subscription."** No support ticket can bypass this — it's an eligibility rule by offer type, not an approval issue.
 
-Esto también bloquea, además del wiki, cualquier otro plan que dependa de una VM en esta
-cuenta (ej. un gateway WireGuard dedicado) mientras siga siendo Azure for Students sin
-upgrade.
+This also blocks, besides the wiki, any other plan depending on a VM on this account (e.g., a dedicated WireGuard gateway) while it stays Azure for Students without upgrade.
 
-## Pasos de implementación (escritos, sin correr — bloqueado en quota)
+## Implementation steps (written, not run — blocked on quota)
 
-Ya existen como código, no como lista de pasos manuales:
+They already exist as code, not as a manual step list:
 
-- `yamls/templates/wiki-vm-compose.yml.tpl` → `yamls/generate-wiki-vm.sh` genera
-  `yamls/generated/wiki-vm-docker-compose.yml` (wiki + wiki-db + red `wiki_backend`,
-  mismas imágenes `maosuarez/sabanacorp-wiki` / `maosuarez/sabanacorp-wikidb` que ya usa
-  la DMZ en ACI, mismos secretos literales que `dmz-wiki.yaml.tpl`/`dmz-wiki-db.yaml.tpl`).
-- `yamls/wiki-vm/cloud-init.yaml` — instala Docker Engine + compose plugin al primer
-  arranque vía el script oficial de Docker (`get.docker.com`).
-- `lab-azure.sh:create_wiki_vm()` (comando `./lab-azure.sh deploy-wiki-vm`) — crea
-  `vm-wiki` en `snet-dmz-vm` sin IP pública ni NSG, espera a que Docker esté listo, y
-  copia+levanta el compose vía `az vm run-command invoke` (no usa SSH — evita depender de
-  `nsg-jumpbox`/IP pública para la administración inicial).
+- `yamls/templates/wiki-vm-compose.yml.tpl` → `yamls/generate-wiki-vm.sh` generates `yamls/generated/wiki-vm-docker-compose.yml` (wiki + wiki-db + network `wiki_backend`, same images `maosuarez/sabanacorp-wiki` / `maosuarez/sabanacorp-wikidb` that DMZ already uses on ACI, same literal secrets as `dmz-wiki.yaml.tpl`/`dmz-wiki-db.yaml.tpl`).
+- `yamls/wiki-vm/cloud-init.yaml` — installs Docker Engine + compose plugin on first boot via Docker's official script (`get.docker.com`).
+- `lab-azure.sh:create_wiki_vm()` (command `./lab-azure.sh deploy-wiki-vm`) — creates `vm-wiki` in `snet-dmz-vm` without public IP or NSG, waits for Docker to be ready, and copies+brings up the compose via `az vm run-command invoke` (doesn't use SSH — avoids depending on `nsg-jumpbox`/public IP for initial admin).
 
-Riesgos no verificados porque nunca corrió, a revisar la primera vez que se pruebe de
-verdad:
+Unverified risks because it never ran, to check the first time it's actually tested:
 
-- **Salida a internet de `snet-dmz-vm`**: el cloud-init necesita descargar el script de
-  Docker. No se confirmó si esta subred tiene salida por defecto (Azure la está
-  deprecando para subredes nuevas) — los contenedores ACI de la DMZ sí bajan imágenes de
-  Docker Hub hoy, pero eso no prueba nada sobre `snet-dmz-vm` (subred distinta, sin
-  containerInstance).
-- **`az vm run-command invoke`** nunca se probó en esta suscripción — si falla, hay que
-  caer al camino con SSH + `nsg-jumpbox` (ya existe, ver más abajo) en vez de run-command.
-- Después de que `docker compose up -d` corra por primera vez, sigue pendiente: verificar
-  acceso desde un contenedor ACI de la DMZ (`az container exec` a `dmz-decoy-nas` → `curl`
-  a la IP privada de la VM), y actualizar `yamls/templates/dmz-wiki*.yaml.tpl` +
-  `yamls/README.md` para retirar esos dos del flujo de `deploy_dmz` una vez la VM
-  reemplace a los contenedores ACI equivalentes.
+- **Internet output from `snet-dmz-vm`**: cloud-init needs to download Docker's script. Not confirmed if this subnet has default outbound (Azure is deprecating it for new subnets) — DMZ's ACI containers do pull images from Docker Hub today, but that tests nothing about `snet-dmz-vm` (different subnet, no containerInstance).
+- **`az vm run-command invoke`** was never tested on this subscription — if it fails, need to fall back to SSH + `nsg-jumpbox` (already exists, see below) instead of run-command.
+- After `docker compose up -d` runs the first time, still pending: verify access from an ACI container in the DMZ (`az container exec` to `dmz-decoy-nas` → `curl` to the VM's private IP), and update `yamls/templates/dmz-wiki*.yaml.tpl` + `yamls/README.md` to remove those two from the `deploy_dmz` flow once the VM replaces the equivalent ACI containers.
 
-Se había creado (en una sesión de prueba anterior, ya destruida junto con el resto del
-RG el 2026-08-02) un NSG `nsg-jumpbox` con SSH (22) restringido a una IP pública — si se
-necesita SSH real en vez de run-command, hay que recrearlo, la definición no quedó
-guardada en este repo.
+An NSG `nsg-jumpbox` with SSH (22) restricted to a public IP had been created (in an earlier test session, already destroyed along with the rest of the Resource Group on 2026-08-02) — if real SSH is needed instead of run-command, it needs to be recreated, the definition wasn't saved in this repo.
 
-## Abierto / no decidido
+## Open / not decided
 
-- Camino de desbloqueo: upgrade a Pay-As-You-Go (decisión de facturación del dueño de la
-  cuenta) vs. abandonar VM y mover wiki/WireGuard a ACI con capability `NET_ADMIN`
-  (sin confirmar si ACI lo soporta para crear interfaces TUN).
-- Costo/tiempo de vida de la VM una vez exista: a diferencia de ACI (pay-per-second,
-  fácil de tirar y recrear), una VM acumula costo mientras esté encendida — decidir si se
-  apaga (`az vm deallocate`) fuera de horarios de prueba/evento.
-- Tamaño real de la VM (`WIKI_VM_SIZE`, default `Standard_D2s_v7` en el script): elegido
-  solo porque fue la única familia confirmada desplegable en las pruebas, no por
-  necesidad de recursos del wiki en sí (BookStack + MariaDB para un CTF de un día es
-  liviano).
+- Unblocking path: upgrade to Pay-As-You-Go (account owner's billing decision) vs. abandon the VM and move wiki/WireGuard to ACI with `NET_ADMIN` capability (unconfirmed if ACI supports creating TUN interfaces).
+- Cost/lifetime of the VM once it exists: unlike ACI (pay-per-second, easy to tear down and recreate), a VM accumulates cost while running — decide whether to shut it down (`az vm deallocate`) outside test/event hours.
+- Actual VM size (`WIKI_VM_SIZE`, default `Standard_D2s_v7` in the script): chosen only because it was the only family confirmed deployable in tests, not by actual wiki resource needs (BookStack + MariaDB for a one-day CTF is lightweight).

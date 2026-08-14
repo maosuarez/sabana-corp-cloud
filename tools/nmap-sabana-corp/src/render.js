@@ -1,7 +1,7 @@
-// "Formato del output": tabla de texto o --json, mismos campos en los dos. Nunca imprime nada
-// que la tabla "Lo que explícitamente NO se muestra" prohíba -- ver docs/plans/nmap-sabana-corp.md.
-// Regla de esta capa: la etiqueta de servicio sale solo del numero de puerto (catalog.js),
-// jamas del rol del host.
+// "Output format": text table or --json, same fields in both. Never prints anything
+// that the "What is explicitly NOT shown" table forbids -- see docs/plans/nmap-sabana-corp.md.
+// Rule of this layer: service label comes only from port number (catalog.js),
+// never from host role.
 
 function pad(text, width) {
   return text.length >= width ? text : text + ' '.repeat(width - text.length)
@@ -13,13 +13,13 @@ function formatPorts(ports) {
 
 function scopeHeaderLines(data) {
   const lines = []
-  lines.push(`nmap-sabana-corp v${data.version} -- barrido TCP connect del entorno accesible (sin privilegios)`)
-  lines.push(`alcance : ${data.scope.cidrs.join(', ')}   (origen: ${data.scope.origin})`)
+  lines.push(`nmap-sabana-corp v${data.version} -- TCP connect scan of accessible environment (no privileges)`)
+  lines.push(`scope    : ${data.scope.cidrs.join(', ')}   (source: ${data.scope.origin})`)
   if (data.scope.warning) lines.push(data.scope.warning)
   lines.push(
     data.resolver.up
-      ? `nombres : ${data.resolver.ip} (resolutor del lab, activo)`
-      : `nombres : ${data.resolver.ip} (resolutor del lab, sin respuesta -- mostrando solo IPs)`
+      ? `names    : ${data.resolver.ip} (lab resolver, up)`
+      : `names    : ${data.resolver.ip} (lab resolver, no response -- showing IPs only)`
   )
   return lines
 }
@@ -42,7 +42,7 @@ export function renderText(data) {
     if (hosts.length === 0) continue
     lines.push(`-- ${cidr} ${'-'.repeat(Math.max(0, 76 - cidr.length))}`)
     if (!headerPrinted) {
-      lines.push(`${pad('IP', ipWidth)}${pad('FQDN', fqdnWidth)}PUERTOS ABIERTOS`)
+      lines.push(`${pad('IP', ipWidth)}${pad('FQDN', fqdnWidth)}OPEN PORTS`)
       headerPrinted = true
     }
     for (const host of [...hosts].sort((a, b) => (a.ip > b.ip ? 1 : -1))) {
@@ -53,16 +53,16 @@ export function renderText(data) {
 
   const elapsedSeconds = (data.stats.elapsedMs / 1000).toFixed(1)
   lines.push(
-    `${data.hosts.length} hosts vivos - ${data.stats.portsOpen} puertos abiertos - ` +
-      `${data.stats.addressesScanned} direcciones sondeadas en ${elapsedSeconds} s`
+    `${data.hosts.length} hosts alive - ${data.stats.portsOpen} open ports - ` +
+      `${data.stats.addressesScanned} addresses probed in ${elapsedSeconds} s`
   )
 
   if (data.hosts.length === 0) {
-    lines.push('si esperabas ver algo aca: primero verifica tu tunel (--conf te confirma el AllowedIPs exacto), luego avisa al staff.')
+    lines.push('if you expected to see something here: first verify your tunnel (--conf confirms the exact AllowedIPs), then tell staff.')
   } else if (data.resolver.up) {
     const withoutFqdn = data.hosts.filter((h) => !h.fqdn).length
     if (withoutFqdn > 0) {
-      lines.push(`${withoutFqdn} hosts sin FQDN (sin registro DNS; no es un fallo -- ver README)`)
+      lines.push(`${withoutFqdn} hosts without FQDN (no DNS record; this is not a failure -- see README)`)
     }
   }
 

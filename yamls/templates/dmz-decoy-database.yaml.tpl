@@ -1,4 +1,4 @@
-# ACI container group: decoy-database (compartido, snet-dmz-shared 10.50.0.0/24)
+# ACI container group: decoy-database (shared, snet-dmz-shared 10.50.0.0/24)
 # Perfil "database": MySQL placeholder 3306 + Postgres placeholder 5432.
 apiVersion: 2021-07-01
 location: eastus2
@@ -17,9 +17,9 @@ properties:
         resources: {requests: {cpu: 0.25, memoryInGB: 0.5}}
         ports: [{port: 3306}, {port: 5432}]
 
-  # DNSCONFIG-BEGIN -- lo elimina el generador si LAB_DNS_SERVER esta vacio (lab sin gateway).
-  # 2o nameserver a proposito: si dnsmasq no responde, el contenedor sigue resolviendo internet
-  # via Azure DNS (ver docs/plans/internal-dns.md).
+  # DNSCONFIG-BEGIN -- removed by the generator if LAB_DNS_SERVER is empty (lab without gateway).
+  # 2nd nameserver on purpose: if dnsmasq does not respond, the container still resolves internet
+  # via Azure DNS (see docs/plans/internal-dns.md).
   dnsConfig:
     nameServers:
       - "${LAB_DNS_SERVER}"

@@ -1,25 +1,25 @@
 #!/usr/bin/env bash
 #
-# generate-monitor.sh — arma yamls/generated/monitor/, el arbol completo que lab-azure.sh
-# empaqueta y empuja a vm-monitor (docker-compose + prometheus + blackbox + grafana + el script
-# de descubrimiento). Ver docs/plans/observability-monitoring.md (F1).
+# generate-monitor.sh — builds yamls/generated/monitor/, the complete tree that lab-azure.sh
+# packages and pushes to vm-monitor (docker-compose + prometheus + blackbox + grafana + the
+# discovery script). See docs/plans/observability-monitoring.md (F1).
 #
-# Plantillas resueltas via envsubst (monitor-compose.yml.tpl, monitor-gen-targets.service.tpl);
-# el resto de yamls/monitor/ (prometheus.yml, blackbox.yml, grafana/, remote/gen_targets.py,
-# remote/gen-targets.timer) no depende de ninguna variable y se copia tal cual — mismo espiritu
-# que generate-wiki-vm.sh.
+# Templates resolved via envsubst (monitor-compose.yml.tpl, monitor-gen-targets.service.tpl);
+# the rest of yamls/monitor/ (prometheus.yml, blackbox.yml, grafana/, remote/gen_targets.py,
+# remote/gen-targets.timer) does not depend on any variables and is copied as-is — same spirit
+# as generate-wiki-vm.sh.
 #
-# Variables de entorno usadas: RESOURCE_GROUP, GRAFANA_ADMIN_PASSWORD (literal si no se exporta,
-# igual que los secretos del wiki -- ver yamls/README.md).
+# Environment variables used: RESOURCE_GROUP, GRAFANA_ADMIN_PASSWORD (literal if not exported,
+# same as wiki secrets -- see yamls/README.md).
 #
-# Uso:
+# Usage:
 #   ./generate-monitor.sh
 #
-# Escribe yamls/generated/monitor/
+# Writes yamls/generated/monitor/
 
 set -euo pipefail
 
-command -v envsubst >/dev/null 2>&1 || { echo "[ERROR] falta 'envsubst' (paquete gettext-base)."; exit 1; }
+command -v envsubst >/dev/null 2>&1 || { echo "[ERROR] missing 'envsubst' (package gettext-base)."; exit 1; }
 
 WORKDIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
 TEMPLATES="${WORKDIR}/templates"
@@ -39,4 +39,4 @@ cp -r "${SRC}/prometheus" "${SRC}/blackbox" "${SRC}/grafana" "${OUTDIR}/"
 mkdir -p "${OUTDIR}/remote"
 cp "${SRC}/remote/gen_targets.py" "${SRC}/remote/gen-targets.timer" "${OUTDIR}/remote/"
 
-echo "generado: ${OUTDIR}"
+echo "generated: ${OUTDIR}"

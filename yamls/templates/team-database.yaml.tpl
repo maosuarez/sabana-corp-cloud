@@ -1,7 +1,7 @@
-# Plantilla ACI: database, agnostica al numero de equipo (variable ${TEAM}).
-# Generar con: yamls/generate-team.sh <TEAM>
-# Secretos/flags: compartidos por TODOS los equipos, vienen de yamls/.env.secrets (mismo valor
-# para team1, team2, ..., teamN -- ver yamls/README.md).
+# ACI template: database, agnostic to team number (variable ${TEAM}).
+# Generate with: yamls/generate-team.sh <TEAM>
+# Secrets/flags: shared by ALL teams, come from yamls/.env.secrets (same value
+# for team1, team2, ..., teamN -- see yamls/README.md).
 apiVersion: 2021-07-01
 location: eastus2
 name: team${TEAM}-database
@@ -20,10 +20,10 @@ properties:
         resources: {requests: {cpu: 0.5, memoryInGB: 0.5}}
         ports: [{port: 3306}]
 
-  # DNSCONFIG-BEGIN -- lo elimina el generador si LAB_DNS_SERVER esta vacio (lab sin gateway).
-  # 2o nameserver a proposito: si dnsmasq no responde, el contenedor sigue resolviendo internet
-  # via Azure DNS. Los nombres del lab dejan de resolver, pero ningun reto se cae porque
-  # DB_HOST/WEBAPP_BASE_URL siguen siendo IPs (ver docs/plans/internal-dns.md).
+  # DNSCONFIG-BEGIN -- removed by generator if LAB_DNS_SERVER is empty (lab without gateway).
+  # 2nd nameserver on purpose: if dnsmasq doesn't respond, container keeps resolving internet
+  # via Azure DNS. Lab names stop resolving, but no challenge fails because
+  # DB_HOST/WEBAPP_BASE_URL remain IPs (see docs/plans/internal-dns.md).
   dnsConfig:
     nameServers:
       - "${LAB_DNS_SERVER}"

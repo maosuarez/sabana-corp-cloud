@@ -1,7 +1,7 @@
 #!/usr/bin/env node
-// Parseo de flags, orquestacion (alcance -> escaneo -> nombres -> render), codigos de salida.
-// 0 = corrida normal (incluye "0 hosts vivos", eso no es un error). 2 = error accionable del
-// usuario (alcance no derivable, flag invalida). 1 = error inesperado.
+// Flag parsing, orchestration (scope -> scan -> names -> render), exit codes.
+// 0 = normal run (includes "0 hosts alive", that's not an error). 2 = user-actionable error
+// (scope not derivable, invalid flag). 1 = unexpected error.
 
 import { CATALOG_PORTS, RESOLVER_IP, VERSION, serviceForPort } from '../src/catalog.js'
 import { resolveNames } from '../src/names.js'
@@ -11,24 +11,24 @@ import { ScopeError, resolveScope } from '../src/scope.js'
 
 class CliError extends Error {}
 
-const HELP = `nmap-sabana-corp v${VERSION} -- descubrimiento de red para el CTF de Sabana Corp
+const HELP = `nmap-sabana-corp v${VERSION} -- network discovery for the Sabana Corp CTF
 
-Uso:
-  nmap-sabana-corp [--scan] [opciones]
+Usage:
+  nmap-sabana-corp [--scan] [options]
 
-Opciones:
-  --cidr <a,b,c>      alcance explicito (staff / casos raros). Nunca automatico.
-  --conf <ruta>       deriva el alcance de AllowedIPs en un .conf de WireGuard (autoritativo).
-  --ports <a,b,c>     puertos extra a sumar al catalogo del lab.
-  --concurrency <n>   sockets simultaneos (por defecto ${DEFAULT_CONCURRENCY}).
-  --json              salida en JSON en vez de tabla de texto.
-  --scan              no-op explicito: escanear es lo unico que hace este comando.
-  --version           imprime la version y sale.
-  --help              esta ayuda.
+Options:
+  --cidr <a,b,c>      explicit scope (staff / edge cases). Never automatic.
+  --conf <path>       derives scope from AllowedIPs in a WireGuard .conf (authoritative).
+  --ports <a,b,c>     extra ports to add to the lab catalog.
+  --concurrency <n>   simultaneous sockets (default ${DEFAULT_CONCURRENCY}).
+  --json              output in JSON instead of text table.
+  --scan              explicit no-op: scanning is the only thing this command does.
+  --version           print the version and exit.
+  --help              this help.
 
-Sin --cidr ni --conf, el alcance se deriva de la interfaz de tunel WireGuard activa (busca una
-direccion dentro de 10.200.0.0/16). No banners, no version de servicio, no deteccion de SO -- ver
-README.md para el detalle completo y la lista de lo que esta herramienta nunca muestra.
+Without --cidr or --conf, scope is derived from the active WireGuard tunnel interface (looks for
+an address within 10.200.0.0/16). No banners, no service version, no OS detection -- see
+README.md for full details and the list of what this tool never shows.
 `
 
 function parseArgs(argv) {
@@ -61,7 +61,7 @@ function parseArgs(argv) {
         args.help = true
         break
       default:
-        throw new CliError(`opcion no reconocida: ${arg} (usa --help)`)
+        throw new CliError(`unrecognized option: ${arg} (use --help)`)
     }
   }
   return args

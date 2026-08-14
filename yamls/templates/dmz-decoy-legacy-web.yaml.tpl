@@ -1,4 +1,4 @@
-# ACI container group: decoy-legacy-web (compartido, snet-dmz-shared 10.50.0.0/24)
+# ACI container group: decoy-legacy-web (shared, snet-dmz-shared 10.50.0.0/24)
 # Perfil "legacy-web": HTTP 80 (Apache falso) + HTTP 8080 (Tomcat falso, 403).
 apiVersion: 2021-07-01
 location: eastus2
@@ -17,9 +17,9 @@ properties:
         resources: {requests: {cpu: 0.25, memoryInGB: 0.5}}
         ports: [{port: 80}, {port: 8080}]
 
-  # DNSCONFIG-BEGIN -- lo elimina el generador si LAB_DNS_SERVER esta vacio (lab sin gateway).
-  # 2o nameserver a proposito: si dnsmasq no responde, el contenedor sigue resolviendo internet
-  # via Azure DNS (ver docs/plans/internal-dns.md).
+  # DNSCONFIG-BEGIN -- removed by the generator if LAB_DNS_SERVER is empty (lab without gateway).
+  # 2nd nameserver on purpose: if dnsmasq does not respond, the container still resolves internet
+  # via Azure DNS (see docs/plans/internal-dns.md).
   dnsConfig:
     nameServers:
       - "${LAB_DNS_SERVER}"

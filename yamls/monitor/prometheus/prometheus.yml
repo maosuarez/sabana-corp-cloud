@@ -1,11 +1,11 @@
-# prometheus.yml -- vm-monitor (snet-mgmt). Ver docs/plans/observability-monitoring.md.
+# prometheus.yml -- vm-monitor (snet-mgmt). See docs/plans/observability-monitoring.md.
 #
-# Dos fuentes de señal, unidas por los labels team/service (ver plan, "sondeo externo, no
-# agentes"):
-#   - blackbox-aci: sonda TCP/HTTP contra la IP:puerto real de cada servicio, targets generados
-#     por gen-targets.sh (file_sd, se recarga solo, sin reiniciar Prometheus).
-#   - node (textfile collector de node-exporter): estado de control plane (Running/Terminated,
-#     restartCount) y sabana_ip_drift, escritos por el mismo gen-targets.sh en la misma pasada.
+# Two signal sources, joined by team/service labels (see plan, "external probing, no
+# agents"):
+#   - blackbox-aci: TCP/HTTP probe against the real IP:port of each service, targets generated
+#     by gen-targets.sh (file_sd, reloads on its own, without restarting Prometheus).
+#   - node (textfile collector from node-exporter): control plane state (Running/Terminated,
+#     restartCount) and sabana_ip_drift, written by gen-targets.sh in the same pass.
 global:
   scrape_interval: 15s
   evaluation_interval: 15s
@@ -18,8 +18,8 @@ scrape_configs:
           - /etc/prometheus/targets/aci_targets.json
         refresh_interval: 1m
     relabel_configs:
-      # __address__ en el target file ES la IP:puerto real a sondear -- se mueve a __param_target
-      # y se reemplaza por la direccion del blackbox-exporter, que es lo que Prometheus scrapea.
+      # __address__ in the target file IS the real IP:port to probe -- it moves to __param_target
+      # and is replaced by the blackbox-exporter address, which is what Prometheus scrapes.
       - source_labels: [__address__]
         target_label: __param_target
       - source_labels: [probe_module]
